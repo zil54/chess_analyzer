@@ -1,71 +1,65 @@
-♟️ Chess Analyzer
-A modular chess analysis platform built with FastAPI (backend), Vue 3 (frontend), and Stockfish (engine).
-It allows users to upload PGN files, extract critical positions, and test themselves interactively against engine‑evaluated lines.
+♟♟️ Chess Analyzer
+A modular, production-grade chess analysis app built with FastAPI, Vue 3, and Stockfish. Supports FEN rendering, live analysis via WebSocket, PGN upload with session tracking, and SVG board visualization.
 
 🚀 Features
-• 	PGN Upload: Upload a PGN file and automatically extract critical positions (with  markers).
-• 	Dynamic Analysis: Run Stockfish analysis on critical positions with multiple candidate lines.
-• 	TestMe Mode: Practice decision‑making on critical positions after PGN upload.
-• 	Clean Architecture: Modular backend with async Postgres integration ( /  ready).
-• 	Frontend UI: Vue‑based interface with  as the main component.
+• 	FEN Board Rendering: Send a FEN string and receive an SVG-rendered chess board.
+• 	Live Stockfish Analysis: Stream multi-PV lines via WebSocket with throttled output.
+• 	PGN Upload: Upload  files, store critical positions, and manage sessions.
+• 	Modular Backend: Clean separation of routes, engine logic, and SVG rendering.
+• 	Vue Frontend: Responsive UI with buttons for rendering, live analysis, and PGN upload.
+• 	Persistent Stockfish Session: Keeps the engine warm for fast response times.
+• 	SPA Routing Support: Vue Router history mode enabled via FastAPI fallback.
 
-📂 Project Structure
-chess_analyzer/
-│
-├── backend/                # FastAPI backend
-│   ├── main.py              # Entry point (Uvicorn app)
-│   ├── db/                  # Database layer
-│   ├── engine/              # Stockfish integration
-│   └── routes/              # API endpoints
-│
-├── frontend/               # Vue 3 frontend
-│   ├── src/
-│   │   ├── components/
-│   │   │   └── Analyzer.vue
-│   │   └── main.js
-│   └── public/
-│       └── index.html
-│
-├── tests/                  # Async pytest suite
-├── requirements.txt        # Python dependencies
-└── README.md
 
-⚙️ Backend Setup
-1. Create virtual environment
-python -m venv venv
-source venv/bin/activate   # Linux/Mac
-venv\Scripts\activate      # Windows
-2. Install dependencies
+📦 Setup
+1. Clone the repo
+git clone https://github.com/your-org/chess-analyzer.git
+cd chess-analyzer
+2. Install backend dependencies
+cd backend
 pip install -r requirements.txt
-3. Run backend
-uvicorn chess_analyzer.backend.main:app --reload
-Backend runs at: http://127.0.0.1:8000
-   (see main.py)
-🎨 Frontend Setup
-1. Install dependencies
+3. Build the frontend
 cd frontend
 npm install
-2. Run dev server
-npm run dev
-Frontend runs at: http://localhost:5173 (Vite default).
+npm run build
+4. Run the app
+cd backend
+python main.py
+Visit: http://localhost:8000
 
-🗄️ Database
-• 	Postgres with async driver ( / ).
-• 	Schema includes:
-• 	 (stores PGN + status)
-• 	 (FENs extracted from PGN)
-• 	 +  (engine results)
+🔌 API Endpoints
+Absolutely, Dima — here’s the API Endpoints section rewritten in plain text for easy copy-pasting:
 
-🧪 Testing
-Run async tests with:
-pytest -v
+🔌 API Endpoints
+POST /svg
+Receives a FEN string in JSON and returns an SVG-rendered chess board.
+Request body: 
+Response: 
 
-🤝 Contributing
-1. 	Fork the repo
-2. 	Create a feature branch ()
-3. 	Commit changes ()
-4. 	Push branch ()
-5. 	Open a Pull Request
+POST /analyze
+Performs a one-shot Stockfish analysis on a given FEN.
+Request body: 
+Response: JSON with analysis lines
 
-📜 License
-MIT License — feel free to use, modify, and distribute.
+WebSocket /ws/analyze
+Streams live multi-PV analysis from Stockfish.
+Client sends: FEN string as plain text
+Server responds: multiple lines of Stockfish output (e.g., )
+
+POST /sessions
+Creates a new PGN analysis session.
+Request body: 
+Response: 
+
+POST /sessions/{session_id}/upload_pgn
+Uploads a PGN file to an existing session.
+Request:  with  field
+Response: 
+
+
+🧠 Dev Notes
+• 	WebSocket stream throttled with 
+• 	Vue frontend served via FastAPI static mount at 
+• 	SPA fallback route handles Vue Router history mode
+• 	PGN upload uses  and session-based routing
+• 	Logging via custom 
