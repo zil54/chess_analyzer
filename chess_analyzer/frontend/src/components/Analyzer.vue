@@ -3,38 +3,45 @@
     <h2>Enter FEN:</h2>
     <input v-model="fen" />
     <button @click="renderBoard">Render</button>
-    <button @click="analyzeStatic">Analyze (Static)</button>
-    <button @click="analyzeLive">Analyze (Live)</button>
+    <button @click="analyzeLive" :disabled="!canAnalyze || !isFenValid">Analyze (Live)</button>
     <button @click="stopLiveAnalysis">Stop</button>
+    <h1>PGN Upload Test</h1>
+    <button @click="uploadPGN">Upload PGN</button>
 
     <div id="svg-container" v-html="svgBoard"></div>
 
-    <pre class="static-output" v-if="staticOutput">{{ staticOutput }}</pre>
     <div class="live-output">
-  <pre v-for="(line, idx) in pvLines" :key="idx">{{ line }}</pre>
-</div>
-
-
+      <pre v-for="(line, idx) in pvLines" :key="idx">{{ line }}</pre>
+    </div>
   </div>
 </template>
 
 <script>
 export default {
   name: 'Analyzer',
-data() {
-  return {
-    fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-    svgBoard: "",
-    staticOutput: "",
-    pvLines: [],
-    socket: null
-  };
-},
+  data() {
+    return {
+      fen: "",
+      svgBoard: "",
+      pvLines: [],
+      socket: null,
+    };
+  },
+
   mounted() {
-    // ✅ Set the page title when this component is mounted
     document.title = "Chess Analyzer";
   },
 
+  computed: {
+    canAnalyze() {
+      return this.fen && this.fen.trim().length > 0;
+    },
+    isFenValid() {
+      if (!this.fen) return false;
+      const parts = this.fen.trim().split(/\s+/);
+      return parts.length === 6;
+    }
+  },
 
   methods: {
     async renderBoard() {
@@ -45,55 +52,63 @@ data() {
       });
       this.svgBoard = await res.text();
     },
-    async analyzeStatic() {
-      this.staticOutput = "";
-      const res = await fetch("http://localhost:8000/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fen: this.fen })
-      });
-      const data = await res.json();
-      if (data.error) {
-        this.staticOutput = "Error: " + data.error;
-      } else {
-        this.staticOutput = data.variations
-          .map((v, i) => {
-            const score = v.score >= 10000
-              ? `Mate in ${v.score - 10000}`
-              : `${(v.score / 100).toFixed(2)} eval`;
-            return `#${i + 1}: ${v.line.join(" ")} (${score})`;
-          })
-          .join("\n");
-      }
-    },
+
     analyzeLive() {
-      this.liveOutput = "";
+      this.pvLines = [];
       if (this.socket) this.socket.close();
       this.socket = new WebSocket("ws://localhost:8000/ws/analyze");
 
       this.socket.onopen = () => {
         this.socket.send(this.fen);
       };
-     this.socket.onmessage = (event) => {
-  const line = event.data;
-  if (line.includes(" pv ")) {
-    this.pvLines.push(line);
-  }
-};
-
-
-    this.socket.onerror = (err) => {
-  this.pvLines.push("WebSocket error: " + err.message);
-};
-this.socket.onclose = () => {
-  this.pvLines.push("[Analysis stopped]");
-};
+      this.socket.onmessage = (event) => {
+        const line = event.data;
+        if (line.includes(" pv ")) {
+          this.pvLines.push(line);
+        }
+      };
+      this.socket.onerror = (err) => {
+        this.pvLines.push("WebSocket error: " + err.message);
+      };
+      this.socket.onclose = () => {
+        this.pvLines.push("[Analysis stopped]");
+      };
     },
+
     stopLiveAnalysis() {
       if (this.socket) {
         this.socket.close();
         this.socket = null;
       }
+    },
+
+    async uploadPGN() {
+      const fileInput = document.createElement("input");
+      fileInput.type = "file";
+      fileInput.accept = ".pgn";
+      fileInput.onchange = async () => {
+        const file = fileInput.files[0];
+        const text = await file.text();
+
+        const createRes = await fetch("http://localhost:8000/sessions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pgn: text })
+        });
+        const session = await createRes.json();
+        const sessionId = session.id;
+
+        const formData = new FormData();
+        formData.append("file", file);
+
+        const uploadRes = await fetch(`http://localhost:8000/sessions/${sessionId}/upload_pgn`, {
+          method: "POST",
+          body: formData
+        });
+        const data = await uploadRes.json();
+        console.log("Stored critical positions:", data.stored);
+      };
+      fileInput.click();
     }
   }
 };
@@ -112,14 +127,6 @@ input, button {
 #svg-container {
   margin-top: 10px;
 }
-.static-output {
-  color: #2c3e50;
-  background-color: #e8f0ff;
-  padding: 1rem;
-  margin-top: 1rem;
-  white-space: pre-wrap;
-  border-left: 4px solid #2c3e50;
-}
 .live-output {
   background-color: #f4f4f4;
   color: #2c3e50;
@@ -130,8 +137,8 @@ input, button {
   font-family: 'Courier New', Courier, monospace;
   font-size: 14px;
   overflow-x: auto;
-  max-width: 93vw;       /* ✅ stretches wider but not full screen */
-  text-align: left;      /* ✅ aligns content to the left */
+  max-width: 100vw;
+  text-align: left;
   margin-left: auto;
   margin-right: auto;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
