@@ -32,28 +32,31 @@ Visit: http://localhost:8000
 🔌 API Endpoints
 POST /svg
 Receives a FEN string in JSON and returns an SVG-rendered chess board.
-Request body: 
-Response: 
+Request body: { "fen": "<FEN string>" }
+Response: image/svg+xml
 
 POST /analyze
 Performs a one-shot Stockfish analysis on a given FEN.
-Request body: 
+Request body: { "fen": "<FEN string>" }
 Response: JSON with analysis lines
 
 WebSocket /ws/analyze
 Streams live multi-PV analysis from Stockfish.
 Client sends: FEN string as plain text
-Server responds: multiple lines of Stockfish output (e.g., )
+Server responds: multiple lines of Stockfish output (e.g., info depth 20 score cp 34 pv ...)
 
 POST /sessions
 Creates a new PGN analysis session.
-Request body: 
-Response: 
+Request body: { "name": "My Session" }
+Response: { "session_id": "<UUID>" }
 
 POST /sessions/{session_id}/upload_pgn
 Uploads a PGN file to an existing session.
-Request:  with  field
-Response: 
+Request: multipart/form-data with file field
+Response: { "status": "success", "positions": [...] }
+
+
+
 
 
 🧠 Dev Notes
