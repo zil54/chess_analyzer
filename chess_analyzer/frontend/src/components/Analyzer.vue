@@ -5,6 +5,7 @@
     <button @click="renderBoard">Render</button>
     <button @click="analyzeLive" :disabled="!canAnalyze || !isFenValid">Analyze (Live)</button>
     <button @click="stopLiveAnalysis">Stop</button>
+    <h1>PGN Upload Test</h1>
     <button @click="uploadPGN">Upload PGN</button>
 
     <div id="svg-container" v-html="svgBoard"></div>
@@ -87,15 +88,25 @@ export default {
       fileInput.accept = ".pgn";
       fileInput.onchange = async () => {
         const file = fileInput.files[0];
+        const text = await file.text();
+
+        const createRes = await fetch("http://localhost:8000/sessions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pgn: text })
+        });
+        const session = await createRes.json();
+        const sessionId = session.id;
+
         const formData = new FormData();
         formData.append("file", file);
 
-        const res = await fetch("http://localhost:8000/upload_pgn", {
+        const uploadRes = await fetch(`http://localhost:8000/sessions/${sessionId}/upload_pgn`, {
           method: "POST",
           body: formData
         });
-        const data = await res.json();
-        console.log("Critical positions:", data.positions);
+        const data = await uploadRes.json();
+        console.log("Stored critical positions:", data.stored);
       };
       fileInput.click();
     }
