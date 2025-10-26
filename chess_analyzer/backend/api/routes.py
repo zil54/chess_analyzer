@@ -9,6 +9,9 @@ from chess_analyzer.backend.db.db import (
     insert_critical_positions
 )
 
+from fastapi import APIRouter, Request, HTTPException, Response
+
+
 router = APIRouter()
 
 @router.post("/sessions")
@@ -39,3 +42,19 @@ async def upload_pgn(session_id: int, file: UploadFile = Form(...)):
     await insert_critical_positions(session_id, critical_positions)
 
     return {"stored": len(critical_positions)}
+
+@router.post("/svg")
+async def render_svg(request: Request):
+    data = await request.json()
+    fen = data.get("fen")
+    if not fen:
+        raise HTTPException(status_code=400, detail="Missing FEN")
+
+    try:
+        board = chess.Board(fen)
+        svg = chess.svg.board(board)
+        return Response(content=svg, media_type="image/svg+xml")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid FEN: {str(e)}")
+
+

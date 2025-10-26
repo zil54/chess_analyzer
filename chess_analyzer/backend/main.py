@@ -1,8 +1,6 @@
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import Response, HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from chess_analyzer.backend.svg.svg import generate_board_svg
 from chess_analyzer.engine.engine import run_stockfish
 from chess_analyzer.engine.stockfish_session import StockfishSession
@@ -11,7 +9,7 @@ import asyncio
 import os
 from logs.logger import logger
 from api.routes import router as api_router
-
+from fastapi.staticfiles import StaticFiles
 app = FastAPI()
 app.include_router(api_router)
 
@@ -23,9 +21,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve static assets
-app.mount("/static", StaticFiles(directory="static"), name="static")
-logger.info("Serving static assets for the app")
+
+
+# Absolute path to frontend/dist
+frontend_path = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+
+
+
+
 
 # Persistent Stockfish session
 base_dir = os.path.dirname(os.path.dirname(__file__))  # chess_analyzer/
@@ -111,6 +114,12 @@ async def stream_stockfish():
         await asyncio.sleep(0.1)  # throttle output slightly
 
 app.mount("/", StaticFiles(directory="../frontend/dist", html=True), name="frontend")
+@app.get("/")
+@app.get("/{full_path:path}")
+async def serve_vue_app(full_path: str = ""):
+    return FileResponse(os.path.join(frontend_path, "index.html"))
+
+
 if __name__ == "__main__":
     uvicorn.run("chess_analyzer.backend.main:app", host="127.0.0.1", port=8000, reload=True)
 
