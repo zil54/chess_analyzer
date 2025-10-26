@@ -1,4 +1,3 @@
-
 import sys
 import asyncio
 import os
@@ -6,10 +5,10 @@ import psycopg
 from psycopg.rows import dict_row
 from dotenv import load_dotenv
 from typing import Optional
-
+from uuid import UUID
 
 # -------------------------------------------------------------------
-# Event loop policy (Windows fix)
+# Windows event loop fix
 # -------------------------------------------------------------------
 if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -19,31 +18,21 @@ if sys.platform.startswith("win"):
 # -------------------------------------------------------------------
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
-
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is not set. Check your .env file.")
 
 # -------------------------------------------------------------------
-# Connection helpers
+# Connection helper
 # -------------------------------------------------------------------
-
 async def get_connection():
-    """
-    Open a new async connection to the database.
-    Caller is responsible for closing it.
-    Uses dict_row so results come back as dictionaries.
-    """
     return await psycopg.AsyncConnection.connect(DATABASE_URL, row_factory=dict_row)
 
-
+# -------------------------------------------------------------------
+# Schema initialization
+# -------------------------------------------------------------------
 async def init_db():
-    """
-    Initialize all core tables for the chess analyzer.
-    Safe to call at startup; uses IF NOT EXISTS for idempotency.
-    """
     async with await get_connection() as conn:
         async with conn.cursor() as cur:
-            # 1. Sessions
             await cur.execute("""
                 CREATE TABLE IF NOT EXISTS session (
                     id SERIAL PRIMARY KEY,
@@ -53,8 +42,6 @@ async def init_db():
                     created_at TIMESTAMPTZ DEFAULT now()
                 )
             """)
-
-            # 2. Analyses
             await cur.execute("""
                 CREATE TABLE IF NOT EXISTS analysis (
                     id SERIAL PRIMARY KEY,
@@ -65,8 +52,6 @@ async def init_db():
                     created_at TIMESTAMPTZ DEFAULT now()
                 )
             """)
-
-            # 3. Candidate lines (3 per analysis)
             await cur.execute("""
                 CREATE TABLE IF NOT EXISTS analysis_line (
                     id SERIAL PRIMARY KEY,
@@ -78,8 +63,6 @@ async def init_db():
                     UNIQUE (analysis_id, rank)
                 )
             """)
-
-            # 4. Critical positions
             await cur.execute("""
                 CREATE TABLE IF NOT EXISTS critical_position (
                     id SERIAL PRIMARY KEY,
@@ -90,8 +73,6 @@ async def init_db():
                     created_at TIMESTAMPTZ DEFAULT now()
                 )
             """)
-
-            # 5. (Optional) User feedback
             await cur.execute("""
                 CREATE TABLE IF NOT EXISTS user_feedback (
                     id SERIAL PRIMARY KEY,
@@ -102,19 +83,12 @@ async def init_db():
                     created_at TIMESTAMPTZ DEFAULT now()
                 )
             """)
-
         await conn.commit()
 
-
-
 # -------------------------------------------------------------------
-# Example repository‑style helpers
+# Session helpers
 # -------------------------------------------------------------------
-
-async def insert_session(pgn: str, user_id: Optional[str] = None) -> int:
-    """
-    Insert a new session row (with PGN text and optional user_id) and return its id.
-    """
+async def create_session(pgn: str, user_id: Optional[str] = None) -> int:
     async with await get_connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
@@ -129,11 +103,7 @@ async def insert_session(pgn: str, user_id: Optional[str] = None) -> int:
         await conn.commit()
         return row["id"]
 
-
-async def get_session(session_id: int) -> dict | None:
-    """
-    Fetch a session row by id.
-    """
+async def get_session(session_id: int) -> Optional[dict]:
     async with await get_connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
@@ -146,3 +116,17 @@ async def get_session(session_id: int) -> dict | None:
             )
             return await cur.fetchone()
 
+# -------------------------------------------------------------------
+# Critical position helpers
+# -------------------------------------------------------------------
+async def insert_critical_positions(session_id: int, positions: list[tuple[int, str]]):
+    async with await get_connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                """
+                INSERT INTO critical_position (session_id, move_number, fen, comment)
+                VALUES (%s, %s, %s, %s)
+                """,
+                [(session_id, move, fen, None) for move, fen in positions]
+            )
+        await conn.commit()
