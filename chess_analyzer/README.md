@@ -27,8 +27,7 @@ cd backend
 python main.py
 Visit: http://localhost:8000
 
-🔌 API Endpoints
-Absolutely, Dima — here’s the API Endpoints section rewritten in plain text for easy copy-pasting:
+
 
 🔌 API Endpoints
 POST /svg
