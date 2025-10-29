@@ -1,5 +1,5 @@
 import pytest
-from chess_analyzer.backend.services.analyzer_service import analyze_position
+from backend.services.analyzer_service import analyze_position
 
 @pytest.mark.asyncio
 async def test_analyze_position_returns_expected():
