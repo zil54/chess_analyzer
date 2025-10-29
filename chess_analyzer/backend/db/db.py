@@ -18,13 +18,14 @@ if sys.platform.startswith("win"):
 # -------------------------------------------------------------------
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL is not set. Check your .env file.")
+DB_ENABLED = DATABASE_URL is not None
 
 # -------------------------------------------------------------------
 # Connection helper
 # -------------------------------------------------------------------
 async def get_connection():
+    if not DB_ENABLED:
+        raise RuntimeError("Database is not configured. Set DATABASE_URL in .env file.")
     return await psycopg.AsyncConnection.connect(DATABASE_URL, row_factory=dict_row)
 
 # -------------------------------------------------------------------
