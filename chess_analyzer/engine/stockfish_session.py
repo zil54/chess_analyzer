@@ -1,6 +1,6 @@
 import subprocess
 import threading
-from backend.logs.logger import logger
+from chess_analyzer.backend.logs.logger import logger
 class StockfishSession:
     def __init__(self, path):
         self.process = subprocess.Popen(
