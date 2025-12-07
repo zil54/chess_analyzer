@@ -1,19 +1,21 @@
+
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from backend.svg.svg import generate_board_svg
-from engine.engine import run_stockfish
-from engine.stockfish_session import StockfishSession
+from chess_analyzer.backend.svg.svg import generate_board_svg
+from chess_analyzer.engine.engine import run_stockfish
+from chess_analyzer.engine.stockfish_session import StockfishSession
+from chess_analyzer.backend.logs.logger import logger
+from chess_analyzer.backend.api.routes import router
+from fastapi.staticfiles import StaticFiles
 import uvicorn
 import asyncio
 import os
 import platform
 import shutil
-from backend.logs.logger import logger
-from backend.api.routes import router as api_router
-from fastapi.staticfiles import StaticFiles
+
 app = FastAPI()
-app.include_router(api_router)
+app.include_router(router)
 
 # CORS for frontend access
 app.add_middleware(
@@ -23,16 +25,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-
 # Get base directory
 base_dir = os.path.dirname(os.path.dirname(__file__))  # chess_analyzer/
 
 # Absolute path to frontend/dist
 frontend_path = os.path.join(base_dir, "frontend", "dist")
-
-
-
 
 # Persistent Stockfish session
 
@@ -55,7 +52,7 @@ logger.info(f"Connected to Stockfish at: {stockfish_path}")
 
 # Check database status
 try:
-    from backend.db.db import DB_ENABLED
+    from chess_analyzer.backend.db.db import DB_ENABLED
     if DB_ENABLED:
         logger.info("Database is configured and enabled")
     else:
@@ -89,14 +86,15 @@ async def analyze(request: Request):
     fen = data.get("fen", "")
     try:
         result = run_stockfish(fen, lines=3)
-        return result
         if result is not None:
             logger.info("Analyze generated successfully")
+            return result
         else:
             logger.error("Analyze generated but didn't produce result")
+            return {"error": "No analysis result"}
     except Exception as e:
-        return {"error": str(e)}
         logger.exception("SF Run produced an error")
+        return {"error": str(e)}
 
 @app.websocket("/ws/analyze")
 async def analyze_ws(websocket: WebSocket):
@@ -124,7 +122,6 @@ async def analyze_ws(websocket: WebSocket):
         logger.info("WebSocket closed before analysis finished.")
     except Exception as e:
         logger.error("Unexpected error: %s", e)
-        # ⚠️ Don't send to client here, socket may be closed
 
 
 async def stream_stockfish():
@@ -153,5 +150,4 @@ else:
 
 
 if __name__ == "__main__":
-    uvicorn.run("backend.main:app", host="127.0.0.1", port=8000, reload=True)
-
+    uvicorn.run("chess_analyzer.backend.main:app", host="127.0.0.1", port=8000, reload=True)

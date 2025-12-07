@@ -7,7 +7,7 @@ import io
 import time
 
 try:
-    from backend.db.db import (
+    from chess_analyzer.backend.db.db import (
         create_session,
         get_session,
         insert_critical_positions,
