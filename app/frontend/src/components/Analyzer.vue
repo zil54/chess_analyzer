@@ -25,6 +25,8 @@
       </div>
     </div>
 
+    <button @click="flipBoard" class="flip-btn">Flip Board</button>
+
     <div id="svg-container" v-html="svgBoard"></div>
 
     <!-- Updated analysis output -->
@@ -52,6 +54,8 @@ export default {
       currentMove: 0,
       currentAnalysisLines: [],
       currentAnalysisDepth: 1,
+      boardFlipped: false,
+      waitingForDepthOne: false,
     };
   },
 
@@ -154,32 +158,54 @@ export default {
       const res = await fetch("http://localhost:8000/svg", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fen: this.fen })
+        body: JSON.stringify({ fen: this.fen, flip: this.boardFlipped })
       });
       this.svgBoard = await res.text();
     },
 
     analyzeLive() {
+      // reset UI buffers
       this.pvLines = [];
       this.currentAnalysisLines = [];
       this.currentAnalysisDepth = 1;
+      this.waitingForDepthOne = true;
       if (this.socket) this.socket.close();
       this.socket = new WebSocket("ws://localhost:8000/ws/analyze");
 
       this.socket.onopen = () => {
+        console.log("WS Open, sending fen:", this.fen);
         this.socket.send(this.fen);
       };
       this.socket.onmessage = (event) => {
         const line = event.data;
-        if (line.includes(" pv ")) {
-          this.pvLines.push(line);
-          this.updateAnalysisDisplay();
+        // console.log("WS Recv:", line);
+        if (!line || !line.includes(" pv ")) return;
+        const depthMatch = line.match(/depth (\d+)/);
+
+        if (this.waitingForDepthOne) {
+          if (!depthMatch) return;
+          const d = parseInt(depthMatch[1]);
+          // If the depth matches our expectations of a new search (low depth), start collecting.
+          // Otherwise, if it's unreasonably high immediately (e.g. > 20), it might be stale buffer.
+          // But 5 was too restrictive if engine is fast. Let's try 10 or just accept any depth if we are sure backend resets.
+          // Since backend does "stop" and "ucinewgame", we should trust the new output.
+          // Let's just reset on the first depth we see effectively.
+
+          this.pvLines = [];
+          this.currentAnalysisLines = [];
+          this.currentAnalysisDepth = d;
+          this.waitingForDepthOne = false;
         }
+
+        this.pvLines.push(line);
+        this.updateAnalysisDisplay();
       };
       this.socket.onerror = (err) => {
-        this.pvLines.push("WebSocket error: " + err.message);
+        console.error("WS Error", err);
+        this.pvLines.push("WebSocket error");
       };
       this.socket.onclose = () => {
+        console.log("WS Closed");
         this.pvLines.push("[Analysis stopped]");
       };
     },
@@ -296,20 +322,18 @@ export default {
 
       const depths = Object.keys(linesByDepth).map(d => parseInt(d)).sort((a, b) => a - b);
 
-      // Format each depth with Line 1:, Line 2:, Line 3: on separate lines
-      const allLines = [];
-      for (const depth of depths) {
-        const linesForDepth = linesByDepth[depth];
-        const formattedLines = linesForDepth.map((line, idx) =>
-          `Line ${idx + 1}: ${line.eval} ${line.pv}`
-        ).join('\n\n');
-        allLines.push({ eval: `Depth ${depth}:`, pv: formattedLines });
-      }
+      // Display ONLY the current (latest) depth to avoid old depths lingering
+      if (depths.length === 0) return;
 
-      this.currentAnalysisLines = allLines;
-      if (depths.length > 0) {
-        this.currentAnalysisDepth = depths[depths.length - 1];
-      }
+      const currentDepth = depths[depths.length - 1];
+      this.currentAnalysisDepth = currentDepth;
+
+      const linesForDepth = linesByDepth[currentDepth];
+      const formattedLines = linesForDepth.map((line, idx) =>
+        `Line ${idx + 1}: ${line.eval} ${line.pv}`
+      ).join('\n\n');
+
+      this.currentAnalysisLines = [{ eval: `Depth ${currentDepth}:`, pv: formattedLines }];
     }
   }
 };
