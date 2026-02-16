@@ -1,49 +1,51 @@
 <template>
   <div class="analyzer">
-      <h2>Enter FEN:</h2>
-      <input v-model="fen" />
-      <button @click="renderBoard">Render</button>
-      <button @click="analyzeLive" :disabled="!canAnalyze || !isFenValid">Analyze (Live)</button>
-      <button @click="stopLiveAnalysis">Stop</button>
-      <h1>PGN Upload</h1>
-    <button @click="uploadPGN">Upload PGN File</button>
+    <FenControls
+      :fen="fen"
+      :isFenValid="isFenValid"
+      :canAnalyze="canAnalyze"
+      :isAnalyzing="!!socket"
+      @update:fen="fen = $event"
+      @render-board="renderBoard"
+      @start-analysis="analyzeLive"
+      @stop-analysis="stopLiveAnalysis"
+    />
 
-    <div v-if="pgnData" class="pgn-info">
-      <h3>{{ pgnData.headers.white }} vs {{ pgnData.headers.black }}</h3>
-      <p>{{ pgnData.headers.event }} - {{ pgnData.headers.date }}</p>
-      <p>Result: {{ pgnData.headers.result }}</p>
-      <div class="move-controls">
-        <button @click="firstMove" :disabled="currentMove === 0">⏮ First</button>
-        <button @click="prevMove" :disabled="currentMove === 0">◀ Prev</button>
-        <span>Move {{ currentMove }} / {{ pgnData.total_moves }}</span>
-        <button @click="nextMove" :disabled="currentMove === pgnData.total_moves">Next ▶</button>
-        <button @click="lastMove" :disabled="currentMove === pgnData.total_moves">Last ⏭</button>
-      </div>
-      <div v-if="currentPosition" class="current-move">
-        <strong v-if="currentPosition.san">{{ currentPosition.san }}</strong>
-        <span v-else>Starting position</span>
-      </div>
-    </div>
+    <PgnPanel
+      :pgnData="pgnData"
+      :currentMove="currentMove"
+      :currentPosition="currentPosition"
+      @upload-pgn="uploadPGN"
+      @go-first="firstMove"
+      @go-prev="prevMove"
+      @go-next="nextMove"
+      @go-last="lastMove"
+    />
 
-    <button @click="flipBoard" class="flip-btn">Flip Board</button>
+    <BoardDisplay
+      :svgBoard="svgBoard"
+      @flip-board="flipBoard"
+    />
 
-    <div id="svg-container" v-html="svgBoard"></div>
-
-    <!-- Updated analysis output -->
-    <div class="live-output" v-if="currentAnalysisLines.length > 0">
-      <div v-for="(lineData, idx) in currentAnalysisLines" :key="idx" class="analysis-line">
-        <span class="eval-value">{{ lineData.eval }}</span>
-        <span class="pv-moves">{{ lineData.pv }}</span>
-      </div>
-    </div>
+    <LiveAnalysisPanel :lines="currentAnalysisLines" />
   </div>
 </template>
 
 <script>
 import { Chess } from 'chess.js';
+import FenControls from './FenControls.vue';
+import PgnPanel from './PgnPanel.vue';
+import BoardDisplay from './BoardDisplay.vue';
+import LiveAnalysisPanel from './LiveAnalysisPanel.vue';
 
 export default {
   name: 'Analyzer',
+  components: {
+    FenControls,
+    PgnPanel,
+    BoardDisplay,
+    LiveAnalysisPanel
+  },
   data() {
     return {
       fen: "",
@@ -52,6 +54,7 @@ export default {
       socket: null,
       pgnData: null,
       currentMove: 0,
+      // each entry: { depthLabel: string, lines: [{ label: string, text: string }] }
       currentAnalysisLines: [],
       currentAnalysisDepth: 1,
       boardFlipped: false,
@@ -307,19 +310,23 @@ export default {
         .map((d) => parseInt(d))
         .sort((a, b) => a - b);
 
-      const allLines = [];
-      for (const depth of depths) {
-        const linesForDepth = linesByDepth[depth];
-        const formattedLines = linesForDepth
-          .map((line, idx) => `Line ${idx + 1}: ${line.eval} ${line.pv}`)
-          .join("\n\n");
-        allLines.push({ eval: `Depth ${depth}:`, pv: formattedLines });
-      }
+      if (depths.length === 0) return;
 
-      this.currentAnalysisLines = allLines;
-      if (depths.length > 0) {
-        this.currentAnalysisDepth = depths[depths.length - 1];
-      }
+      const latestDepth = depths[depths.length - 1];
+      const latestLines = linesByDepth[latestDepth];
+      const depthLines = latestLines.map((line, idx) => ({
+        label: `Line ${idx + 1}:`,
+        text: `${line.eval} ${line.pv}`
+      }));
+
+      this.currentAnalysisLines = [
+        {
+          depthLabel: `[Depth ${latestDepth}]`,
+          lines: depthLines
+        }
+      ];
+
+      this.currentAnalysisDepth = latestDepth;
     }
   }
 };
@@ -328,7 +335,7 @@ export default {
 <style scoped>
 .analyzer {
   text-align: center;
-  max-width: 600px;
+  max-width: 900px;
 }
 input, button {
   margin: 5px;
@@ -352,6 +359,7 @@ input, button {
   text-align: left;
   margin-left: auto;
   margin-right: auto;
+  max-width: 700px; /* give more horizontal room so Line 3 wraps better */
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
   border-radius: 4px;
 }
@@ -361,14 +369,6 @@ input, button {
   background-color: #f8f9fa;
   border-radius: 8px;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-}
-.pgn-info h3 {
-  margin: 0 0 10px 0;
-  color: #2c3e50;
-}
-.pgn-info p {
-  margin: 5px 0;
-  color: #666;
 }
 .move-controls {
   margin: 15px 0;
@@ -402,27 +402,6 @@ input, button {
   font-size: 18px;
   color: #4CAF50;
 }
-.analysis-row {
-  margin: 8px 0;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: flex-start;
-  padding: 8px;
-  background-color: #fafafa;
-  border-radius: 4px;
-}
-.depth-label {
-  font-weight: bold;
-  margin-bottom: 5px;
-  color: #2c3e50;
-}
-.analysis-header {
-  font-weight: bold;
-  color: #2c3e50;
-  margin-bottom: 10px;
-  font-size: 14px;
-}
 .analysis-line {
   display: flex;
   align-items: flex-start;
@@ -436,9 +415,9 @@ input, button {
   padding: 4px 12px;
   border-radius: 3px;
   font-family: 'Courier New', Courier, monospace;
-  color: #01579b;
+  color: #2c3e50; /* neutral dark color for depth label */
   font-weight: bold;
-  min-width: 70px;
+  min-width: 100px;
   text-align: right;
   flex-shrink: 0;
 }
@@ -452,14 +431,6 @@ input, button {
   word-break: break-word;
   white-space: pre-wrap;
 }
-.flip-btn {
-  background-color: #2196F3;
-  color: white;
-  padding: 6px 12px;
-  margin: 5px;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 14px;
-}
 </style>
+
+
