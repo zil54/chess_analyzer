@@ -168,45 +168,24 @@ export default {
       this.pvLines = [];
       this.currentAnalysisLines = [];
       this.currentAnalysisDepth = 1;
-      this.waitingForDepthOne = true;
+      this.waitingForDepthOne = false;
       if (this.socket) this.socket.close();
       this.socket = new WebSocket("ws://localhost:8000/ws/analyze");
 
       this.socket.onopen = () => {
-        console.log("WS Open, sending fen:", this.fen);
         this.socket.send(this.fen);
       };
       this.socket.onmessage = (event) => {
         const line = event.data;
-        // console.log("WS Recv:", line);
         if (!line || !line.includes(" pv ")) return;
-        const depthMatch = line.match(/depth (\d+)/);
-
-        if (this.waitingForDepthOne) {
-          if (!depthMatch) return;
-          const d = parseInt(depthMatch[1]);
-          // If the depth matches our expectations of a new search (low depth), start collecting.
-          // Otherwise, if it's unreasonably high immediately (e.g. > 20), it might be stale buffer.
-          // But 5 was too restrictive if engine is fast. Let's try 10 or just accept any depth if we are sure backend resets.
-          // Since backend does "stop" and "ucinewgame", we should trust the new output.
-          // Let's just reset on the first depth we see effectively.
-
-          this.pvLines = [];
-          this.currentAnalysisLines = [];
-          this.currentAnalysisDepth = d;
-          this.waitingForDepthOne = false;
-        }
-
         this.pvLines.push(line);
         this.updateAnalysisDisplay();
       };
       this.socket.onerror = (err) => {
         console.error("WS Error", err);
-        this.pvLines.push("WebSocket error");
       };
       this.socket.onclose = () => {
-        console.log("WS Closed");
-        this.pvLines.push("[Analysis stopped]");
+        // optional: log close
       };
     },
 
@@ -300,7 +279,6 @@ export default {
       if (this.pvLines.length === 0) return;
 
       const linesByDepth = {};
-
       for (const line of this.pvLines) {
         const depthMatch = line.match(/depth (\d+)/);
         const scoreMatch = line.match(/score (cp|mate) (-?\d+)/);
@@ -312,28 +290,36 @@ export default {
             linesByDepth[depth] = [];
           }
           if (linesByDepth[depth].length < 3) {
-            let evalValue = scoreMatch[1] === 'cp' ? (parseInt(scoreMatch[2], 10) / 100).toFixed(2) : `#${scoreMatch[2]}`;
-            const pvUci = pvMatch ? pvMatch[1] : '';
-            const pvAlgebraic = pvUci ? this.convertToAlgebraic(pvUci, this.fen) : '';
+            const evalValue =
+              scoreMatch[1] === "cp"
+                ? (parseInt(scoreMatch[2], 10) / 100).toFixed(2)
+                : `#${scoreMatch[2]}`;
+            const pvUci = pvMatch ? pvMatch[1] : "";
+            const pvAlgebraic = pvUci
+              ? this.convertToAlgebraic(pvUci, this.fen)
+              : "";
             linesByDepth[depth].push({ eval: evalValue, pv: pvAlgebraic });
           }
         }
       }
 
-      const depths = Object.keys(linesByDepth).map(d => parseInt(d)).sort((a, b) => a - b);
+      const depths = Object.keys(linesByDepth)
+        .map((d) => parseInt(d))
+        .sort((a, b) => a - b);
 
-      // Display ONLY the current (latest) depth to avoid old depths lingering
-      if (depths.length === 0) return;
+      const allLines = [];
+      for (const depth of depths) {
+        const linesForDepth = linesByDepth[depth];
+        const formattedLines = linesForDepth
+          .map((line, idx) => `Line ${idx + 1}: ${line.eval} ${line.pv}`)
+          .join("\n\n");
+        allLines.push({ eval: `Depth ${depth}:`, pv: formattedLines });
+      }
 
-      const currentDepth = depths[depths.length - 1];
-      this.currentAnalysisDepth = currentDepth;
-
-      const linesForDepth = linesByDepth[currentDepth];
-      const formattedLines = linesForDepth.map((line, idx) =>
-        `Line ${idx + 1}: ${line.eval} ${line.pv}`
-      ).join('\n\n');
-
-      this.currentAnalysisLines = [{ eval: `Depth ${currentDepth}:`, pv: formattedLines }];
+      this.currentAnalysisLines = allLines;
+      if (depths.length > 0) {
+        this.currentAnalysisDepth = depths[depths.length - 1];
+      }
     }
   }
 };
