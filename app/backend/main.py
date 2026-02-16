@@ -1,16 +1,29 @@
-
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from chess_analyzer.backend.svg.svg import generate_board_svg
-from chess_analyzer.engine.engine import run_stockfish
-from chess_analyzer.engine.stockfish_session import StockfishSession
-from chess_analyzer.backend.logs.logger import logger
-from chess_analyzer.backend.api.routes import router
+import sys
+import os
+
+# Add parent directories to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+try:
+    from app.backend.svg.svg import generate_board_svg
+    from app.engine.engine import run_stockfish
+    from app.engine.stockfish_session import StockfishSession
+    from app.backend.logs.logger import logger
+    from app.backend.api.routes import router
+except ImportError:
+    from app.backend.svg.svg import generate_board_svg
+    from app.engine.engine import run_stockfish
+    from app.engine.stockfish_session import StockfishSession
+    from app.backend.logs.logger import logger
+    from app.backend.api.routes import router
+
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 import asyncio
-import os
 import platform
 import shutil
 
@@ -52,7 +65,7 @@ logger.info(f"Connected to Stockfish at: {stockfish_path}")
 
 # Check database status
 try:
-    from chess_analyzer.backend.db.db import DB_ENABLED
+    from app.backend.db.db import DB_ENABLED
     if DB_ENABLED:
         logger.info("Database is configured and enabled")
     else:
@@ -60,25 +73,6 @@ try:
 except Exception as e:
     logger.warning(f"Database module could not be loaded: {e}")
 
-
-@app.post("/svg")
-async def svg(request: Request):
-    data = await request.json()
-    fen = data.get("fen", "")
-    logger.info("Received FEN for SVG: %s", fen)
-
-    try:
-        svg_markup = generate_board_svg(fen)
-        if not svg_markup or "<svg" not in svg_markup:
-            logger.error("SVG generation failed or malformed")
-            return Response(content="SVG generation failed", status_code=500)
-
-        logger.info("SVG generated successfully")
-        return Response(content=svg_markup, media_type="image/svg+xml")
-
-    except Exception as e:
-        logger.exception("SVG generation error")
-        return Response(content="SVG generation error", status_code=500)
 
 @app.post("/analyze")
 async def analyze(request: Request):
@@ -101,7 +95,12 @@ async def analyze_ws(websocket: WebSocket):
     await websocket.accept()
     try:
         fen = await websocket.receive_text()
+        # Reset engine state to ensure fresh search from depth 1
+        stockfish.send("stop")
+        stockfish.send("ucinewgame")
         stockfish.send("uci")
+        stockfish.send("isready")
+        stockfish.send("setoption name UCI_AnalyseMode value true")
         stockfish.send("setoption name MultiPV value 3")
         stockfish.send(f"position fen {fen}")
         stockfish.send("go infinite")
@@ -112,16 +111,20 @@ async def analyze_ws(websocket: WebSocket):
                     await websocket.send_text(line)
                 except WebSocketDisconnect:
                     logger.info("Client disconnected, stopping stream.")
+                    stockfish.send("stop")
                     break
                 except RuntimeError as e:
                     if "Cannot call \"send\"" in str(e):
                         logger.info("Tried to send after close, stopping stream.")
+                        stockfish.send("stop")
                         break
                     raise
     except WebSocketDisconnect:
         logger.info("WebSocket closed before analysis finished.")
+        stockfish.send("stop")
     except Exception as e:
         logger.error("Unexpected error: %s", e)
+        stockfish.send("stop")
 
 
 async def stream_stockfish():
@@ -150,4 +153,4 @@ else:
 
 
 if __name__ == "__main__":
-    uvicorn.run("chess_analyzer.backend.main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("app.backend.main:app", host="127.0.0.1", port=8000, reload=True)
