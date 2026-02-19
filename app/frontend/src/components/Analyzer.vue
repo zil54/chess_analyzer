@@ -1,33 +1,46 @@
 <template>
   <div class="analyzer">
-    <FenControls
-      :fen="fen"
-      :isFenValid="isFenValid"
-      :canAnalyze="canAnalyze"
-      :isAnalyzing="!!socket"
-      @update:fen="fen = $event"
-      @render-board="renderBoard"
-      @start-analysis="analyzeLive"
-      @stop-analysis="stopLiveAnalysis"
-    />
+    <div class="layout">
+      <div class="top-left">
+        <PgnPanel
+          :pgnData="pgnData"
+          :currentMove="currentMove"
+          :currentPosition="currentPosition"
+          @upload-pgn="uploadPGN"
+          @go-first="firstMove"
+          @go-prev="prevMove"
+          @go-next="nextMove"
+          @go-last="lastMove"
+        />
+      </div>
 
-    <PgnPanel
-      :pgnData="pgnData"
-      :currentMove="currentMove"
-      :currentPosition="currentPosition"
-      @upload-pgn="uploadPGN"
-      @go-first="firstMove"
-      @go-prev="prevMove"
-      @go-next="nextMove"
-      @go-last="lastMove"
-    />
+      <div class="mid-left">
+        <BoardDisplay
+          :svgBoard="svgBoard"
+          @flip-board="flipBoard"
+        />
+      </div>
 
-    <BoardDisplay
-      :svgBoard="svgBoard"
-      @flip-board="flipBoard"
-    />
+      <aside class="mid-right">
+        <LiveAnalysisPanel :lines="currentAnalysisLines" />
+      </aside>
 
-    <LiveAnalysisPanel :lines="currentAnalysisLines" />
+      <div class="bottom-left">
+        <FenControls
+          :fen="fen"
+          :isFenValid="isFenValid"
+          :canAnalyze="canAnalyze"
+          :isAnalyzing="!!socket"
+          @update:fen="fen = $event"
+          @render-board="renderBoard"
+          @start-analysis="analyzeLive"
+          @stop-analysis="stopLiveAnalysis"
+        />
+      </div>
+
+      <!-- bottom-right intentionally empty for now -->
+      <div class="bottom-right" />
+    </div>
   </div>
 </template>
 
@@ -59,6 +72,13 @@ export default {
       currentAnalysisDepth: 1,
       boardFlipped: false,
       waitingForDepthOne: false,
+
+      // UI smoothing: keep a depth block steady for a short time before updating
+      analysisHoldMs: 12000,
+      pendingAnalysisLines: null,
+      pendingDepth: null,
+      pendingTimer: null,
+      lastRenderedAt: 0,
     };
   },
 
@@ -197,6 +217,13 @@ export default {
         this.socket.close();
         this.socket = null;
       }
+      // Clear any pending UI update timer
+      if (this.pendingTimer) {
+        clearTimeout(this.pendingTimer);
+        this.pendingTimer = null;
+      }
+      this.pendingAnalysisLines = null;
+      this.pendingDepth = null;
     },
 
     async uploadPGN() {
@@ -293,14 +320,25 @@ export default {
             linesByDepth[depth] = [];
           }
           if (linesByDepth[depth].length < 3) {
+            // Normalize evaluation so it's always from White's perspective.
+            // In UCI, scores are reported from the side-to-move's perspective.
+            const fenParts = (this.fen || "").trim().split(/\s+/);
+            const sideToMove = fenParts.length >= 2 ? fenParts[1] : 'w';
+            const sign = sideToMove === 'b' ? -1 : 1;
+
+            const rawScore = parseInt(scoreMatch[2], 10);
+            const normalizedScore = rawScore * sign;
+
             const evalValue =
               scoreMatch[1] === "cp"
-                ? (parseInt(scoreMatch[2], 10) / 100).toFixed(2)
-                : `#${scoreMatch[2]}`;
+                ? (normalizedScore / 100).toFixed(2)
+                : `#${normalizedScore}`;
+
             const pvUci = pvMatch ? pvMatch[1] : "";
             const pvAlgebraic = pvUci
               ? this.convertToAlgebraic(pvUci, this.fen)
               : "";
+
             linesByDepth[depth].push({ eval: evalValue, pv: pvAlgebraic });
           }
         }
@@ -319,14 +357,52 @@ export default {
         text: `${line.eval} ${line.pv}`
       }));
 
-      this.currentAnalysisLines = [
+      const newDisplay = [
         {
           depthLabel: `[Depth ${latestDepth}]`,
           lines: depthLines
         }
       ];
 
-      this.currentAnalysisDepth = latestDepth;
+      // If depth hasn't changed, update immediately (same-depth refinements are useful).
+      if (latestDepth === this.currentAnalysisDepth) {
+        this.currentAnalysisLines = newDisplay;
+        this.lastRenderedAt = Date.now();
+        return;
+      }
+
+      // Depth advanced: hold the currently rendered block for a bit to reduce flicker.
+      const now = Date.now();
+      const elapsed = now - (this.lastRenderedAt || 0);
+      const remainingHold = Math.max(0, this.analysisHoldMs - elapsed);
+
+      // Always keep the latest depth as pending.
+      this.pendingAnalysisLines = newDisplay;
+      this.pendingDepth = latestDepth;
+
+      if (this.pendingTimer) {
+        clearTimeout(this.pendingTimer);
+        this.pendingTimer = null;
+      }
+
+      if (remainingHold === 0) {
+        this.currentAnalysisLines = this.pendingAnalysisLines;
+        this.currentAnalysisDepth = this.pendingDepth;
+        this.pendingAnalysisLines = null;
+        this.pendingDepth = null;
+        this.lastRenderedAt = Date.now();
+      } else {
+        this.pendingTimer = setTimeout(() => {
+          this.currentAnalysisLines = this.pendingAnalysisLines || this.currentAnalysisLines;
+          if (this.pendingDepth != null) {
+            this.currentAnalysisDepth = this.pendingDepth;
+          }
+          this.pendingAnalysisLines = null;
+          this.pendingDepth = null;
+          this.pendingTimer = null;
+          this.lastRenderedAt = Date.now();
+        }, remainingHold);
+      }
     }
   }
 };
@@ -335,21 +411,80 @@ export default {
 <style scoped>
 .analyzer {
   text-align: center;
-  max-width: 900px;
+  max-width: 1200px;
+  width: 100%;
 }
+
 input, button {
   margin: 5px;
   padding: 6px 12px;
   font-size: 14px;
 }
-#svg-container {
-  margin-top: 10px;
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(420px, 520px) minmax(320px, 420px);
+  grid-template-rows: auto auto auto;
+  gap: 16px;
+  align-items: start;
+  justify-content: center;
+  padding: 0 12px;
 }
+
+.top-left {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+}
+
+.mid-left {
+  grid-column: 1;
+  grid-row: 2;
+  min-width: 0;
+}
+
+.mid-right {
+  grid-column: 2;
+  grid-row: 2;
+  min-width: 0;
+}
+
+.bottom-left {
+  grid-column: 1;
+  grid-row: 3;
+  min-width: 0;
+}
+
+.bottom-right {
+  grid-column: 2;
+  grid-row: 3;
+}
+
+@media (max-width: 980px) {
+  .layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto auto;
+  }
+  .top-left,
+  .mid-left,
+  .mid-right,
+  .bottom-left,
+  .bottom-right {
+    grid-column: 1;
+  }
+  .top-left { grid-row: 1; }
+  .mid-left { grid-row: 2; }
+  .mid-right { grid-row: 3; }
+  .bottom-left { grid-row: 4; }
+  .bottom-right { display: none; }
+}
+
+/* Live analysis card styling (kept here because LiveAnalysisPanel only defines inner scroll styles) */
 .live-output {
   background-color: #f4f4f4;
   color: #2c3e50;
   padding: 1rem;
-  margin-top: 1rem;
+  margin-top: 0; /* in grid row with board; avoid extra vertical offset */
   border-left: 4px solid #4CAF50;
   font-family: 'Courier New', Courier, monospace;
   font-size: 14px;
@@ -357,51 +492,11 @@ input, button {
   word-wrap: break-word;
   overflow-wrap: break-word;
   text-align: left;
-  margin-left: auto;
-  margin-right: auto;
-  max-width: 700px; /* give more horizontal room so Line 3 wraps better */
+  max-width: 100%;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
   border-radius: 4px;
 }
-.pgn-info {
-  margin: 20px 0;
-  padding: 15px;
-  background-color: #f8f9fa;
-  border-radius: 8px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-}
-.move-controls {
-  margin: 15px 0;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  gap: 10px;
-}
-.move-controls button {
-  padding: 8px 16px;
-  background-color: #4CAF50;
-  color: white;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 14px;
-}
-.move-controls button:hover:not(:disabled) {
-  background-color: #45a049;
-}
-.move-controls button:disabled {
-  background-color: #ccc;
-  cursor: not-allowed;
-}
-.move-controls span {
-  font-weight: bold;
-  color: #2c3e50;
-}
-.current-move {
-  margin-top: 10px;
-  font-size: 18px;
-  color: #4CAF50;
-}
+
 .analysis-line {
   display: flex;
   align-items: flex-start;
@@ -410,17 +505,19 @@ input, button {
   margin-bottom: 4px;
   flex-wrap: nowrap;
 }
+
 .eval-value {
   background-color: #e1f5fe;
   padding: 4px 12px;
   border-radius: 3px;
   font-family: 'Courier New', Courier, monospace;
-  color: #2c3e50; /* neutral dark color for depth label */
+  color: #2c3e50;
   font-weight: bold;
   min-width: 100px;
   text-align: right;
   flex-shrink: 0;
 }
+
 .pv-moves {
   font-family: 'Courier New', Courier, monospace;
   color: #555;
@@ -432,5 +529,4 @@ input, button {
   white-space: pre-wrap;
 }
 </style>
-
 

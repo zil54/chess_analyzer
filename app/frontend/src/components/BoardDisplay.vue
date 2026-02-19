@@ -1,7 +1,7 @@
 <template>
   <div class="board-display">
-    <button @click="$emit('flip-board')" class="flip-btn">Flip Board</button>
     <div id="svg-container" v-html="svgBoard"></div>
+    <button @click="$emit('flip-board')" class="flip-btn">Flip Board</button>
   </div>
 </template>
 
@@ -32,7 +32,7 @@ export default {
   background-color: #2196F3;
   color: white;
   padding: 6px 12px;
-  margin: 5px;
+  margin: 8px 5px 0;
   border: none;
   border-radius: 4px;
   cursor: pointer;
