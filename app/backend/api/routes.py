@@ -7,7 +7,7 @@ import io
 import time
 
 try:
-    from chess_analyzer.backend.db.db import (
+    from app.backend.db.db import (
         create_session,
         get_session,
         insert_critical_positions,
@@ -186,14 +186,14 @@ async def analyze_pgn(request: Request):
 async def render_svg(request: Request):
     data = await request.json()
     fen = data.get("fen")
+    flip = data.get("flip", False)
     if not fen:
         raise HTTPException(status_code=400, detail="Missing FEN")
 
     try:
         board = chess.Board(fen)
-        svg = chess.svg.board(board)
+        # Render with orientation based on flip flag
+        svg = chess.svg.board(board, orientation=chess.BLACK if flip else chess.WHITE)
         return Response(content=svg, media_type="image/svg+xml")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid FEN: {str(e)}")
-
-

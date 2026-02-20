@@ -1,16 +1,29 @@
-
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import Response, HTMLResponse, FileResponse
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from chess_analyzer.backend.svg.svg import generate_board_svg
-from chess_analyzer.engine.engine import run_stockfish
-from chess_analyzer.engine.stockfish_session import StockfishSession
-from chess_analyzer.backend.logs.logger import logger
-from chess_analyzer.backend.api.routes import router
+import sys
+import os
+
+# Add parent directories to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+try:
+    from app.backend.svg.svg import generate_board_svg
+    from app.engine.engine import run_stockfish
+    from app.engine.stockfish_session import StockfishSession
+    from app.backend.logs.logger import logger
+    from app.backend.api.routes import router
+except ImportError:
+    from app.backend.svg.svg import generate_board_svg
+    from app.engine.engine import run_stockfish
+    from app.engine.stockfish_session import StockfishSession
+    from app.backend.logs.logger import logger
+    from app.backend.api.routes import router
+
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 import asyncio
-import os
 import platform
 import shutil
 
@@ -50,9 +63,14 @@ else:
 stockfish = StockfishSession(stockfish_path)
 logger.info(f"Connected to Stockfish at: {stockfish_path}")
 
+# Global token increments for each new analysis run; used to cancel older stream loops
+analysis_run_token = 0
+analysis_run_lock = asyncio.Lock()
+
+
 # Check database status
 try:
-    from chess_analyzer.backend.db.db import DB_ENABLED
+    from app.backend.db.db import DB_ENABLED
     if DB_ENABLED:
         logger.info("Database is configured and enabled")
     else:
@@ -60,25 +78,6 @@ try:
 except Exception as e:
     logger.warning(f"Database module could not be loaded: {e}")
 
-
-@app.post("/svg")
-async def svg(request: Request):
-    data = await request.json()
-    fen = data.get("fen", "")
-    logger.info("Received FEN for SVG: %s", fen)
-
-    try:
-        svg_markup = generate_board_svg(fen)
-        if not svg_markup or "<svg" not in svg_markup:
-            logger.error("SVG generation failed or malformed")
-            return Response(content="SVG generation failed", status_code=500)
-
-        logger.info("SVG generated successfully")
-        return Response(content=svg_markup, media_type="image/svg+xml")
-
-    except Exception as e:
-        logger.exception("SVG generation error")
-        return Response(content="SVG generation error", status_code=500)
 
 @app.post("/analyze")
 async def analyze(request: Request):
@@ -96,43 +95,103 @@ async def analyze(request: Request):
         logger.exception("SF Run produced an error")
         return {"error": str(e)}
 
+
 @app.websocket("/ws/analyze")
 async def analyze_ws(websocket: WebSocket):
     await websocket.accept()
+    global analysis_run_token
+
+    # Each websocket gets its own token; if a new analysis starts, older one stops streaming
+    async with analysis_run_lock:
+        analysis_run_token += 1
+        my_token = analysis_run_token
+
     try:
         fen = await websocket.receive_text()
-        stockfish.send("uci")
-        stockfish.send("setoption name MultiPV value 3")
-        stockfish.send(f"position fen {fen}")
-        stockfish.send("go infinite")
 
-        async for line in stream_stockfish():
-            if "pv" in line:
+        # Make sure any previous infinite search is stopped and its output is flushed
+        await reset_stockfish_for_new_analysis(fen)
+
+        async for line in stream_stockfish(my_token):
+            if not line:
+                continue
+            if " pv " in line:
                 try:
                     await websocket.send_text(line)
                 except WebSocketDisconnect:
                     logger.info("Client disconnected, stopping stream.")
+                    stockfish.send("stop")
                     break
                 except RuntimeError as e:
                     if "Cannot call \"send\"" in str(e):
                         logger.info("Tried to send after close, stopping stream.")
+                        stockfish.send("stop")
                         break
                     raise
     except WebSocketDisconnect:
         logger.info("WebSocket closed before analysis finished.")
+        stockfish.send("stop")
     except Exception as e:
         logger.error("Unexpected error: %s", e)
+        stockfish.send("stop")
 
 
-async def stream_stockfish():
+async def reset_stockfish_for_new_analysis(fen: str):
+    """Reset stockfish to a known clean state before starting a new infinite search.
+
+    This prevents leftover buffered output from a previous search (often higher depth)
+    from being read and sent to the client during a new search.
+    """
+    loop = asyncio.get_event_loop()
+
+    def _do_reset():
+        with stockfish.lock:
+            stockfish.process.stdin.write("stop\n")
+            stockfish.process.stdin.write("ucinewgame\n")
+            stockfish.process.stdin.write("isready\n")
+            stockfish.process.stdin.flush()
+
+            # Drain output until readyok so we start with a clean boundary.
+            while True:
+                out_line = stockfish.process.stdout.readline()
+                if not out_line:
+                    break
+                out_line = out_line.strip()
+                if out_line == "readyok":
+                    break
+
+            stockfish.process.stdin.write("setoption name UCI_AnalyseMode value true\n")
+            stockfish.process.stdin.write("setoption name MultiPV value 3\n")
+            stockfish.process.stdin.write(f"position fen {fen}\n")
+            stockfish.process.stdin.write("go infinite\n")
+            stockfish.process.stdin.flush()
+
+    future = loop.run_in_executor(None, _do_reset, *())
+    await future
+
+
+async def stream_stockfish(my_token: int):
+    global analysis_run_token
     loop = asyncio.get_event_loop()
     while True:
-        line = await loop.run_in_executor(None, stockfish.process.stdout.readline)
+        # If a newer analysis run started, stop streaming from this one.
+        if my_token != analysis_run_token:
+            break
+
+        future = loop.run_in_executor(None, stockfish.process.stdout.readline)
+        line = await future
+
+        # Token could change while we were blocked on readline
+        if my_token != analysis_run_token:
+            break
+
         if line:
             line = line.strip()
             logger.debug("Streaming line from Stockfish: %s", line)
             yield line
-        await asyncio.sleep(0.1)  # throttle output slightly
+
+        await asyncio.sleep(0.05)  # throttle output slightly
+
 
 # Mount frontend if it exists
 if os.path.exists(frontend_path):
@@ -150,4 +209,4 @@ else:
 
 
 if __name__ == "__main__":
-    uvicorn.run("chess_analyzer.backend.main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("app.backend.main:app", host="127.0.0.1", port=8000, reload=True)

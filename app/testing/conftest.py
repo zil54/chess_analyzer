@@ -1,7 +1,9 @@
 # testing/conftest.py
 import sys
 import asyncio
-import sys, asyncio, os
+import os
+
+import pytest
 import pytest_asyncio
 import psycopg
 from dotenv import load_dotenv
@@ -13,9 +15,7 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL is not set. Check your .env file.")
-
-print(DATABASE_URL)
+    pytest.skip("DATABASE_URL is not set; skipping DB-dependent tests.", allow_module_level=True)
 
 @pytest_asyncio.fixture(scope="session")
 async def db_conn():
