@@ -1,8 +1,12 @@
 <template>
   <div class="fen-controls">
-    <h2>Enter FEN:</h2>
-    <input :value="fen" @input="$emit('update:fen', $event.target.value)" />
-    <button @click="$emit('render-board')">Render</button>
+    <!-- FEN input hidden for now (eventually FEN will come from DB/PGN selection) -->
+    <div class="fen-hidden" aria-hidden="true">
+      <h2>Enter FEN:</h2>
+      <input :value="fen" @input="$emit('update:fen', $event.target.value)" />
+      <button @click="$emit('render-board')">Render</button>
+    </div>
+
     <button
       @click="$emit('start-analysis')"
       :disabled="!canAnalyze || !isFenValid || isAnalyzing"
@@ -34,5 +38,8 @@ export default {
 .fen-controls {
   margin-bottom: 10px;
 }
-</style>
 
+.fen-hidden {
+  display: none;
+}
+</style>
