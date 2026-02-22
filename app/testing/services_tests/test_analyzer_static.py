@@ -1,5 +1,5 @@
 import pytest
-from backend.services.analyzer_service import analyze_position
+from app.backend.services.analyzer_service import analyze_position
 
 @pytest.mark.asyncio
 async def test_analyze_position_returns_expected():
@@ -15,4 +15,3 @@ async def test_analyze_position_returns_expected():
     assert "best_move" in result
     assert "evaluation" in result
     assert "depth" in result
-

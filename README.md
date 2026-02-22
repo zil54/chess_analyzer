@@ -1,2 +1,5 @@
-<img width="755" height="723" alt="image" src="https://github.com/user-attachments/assets/f12d8149-7f32-4310-bb0c-bb185c5e817f" />
+<img width="674" height="842" alt="image" src="https://github.com/user-attachments/assets/4dfbef5e-5774-43da-b547-cc6eb523ae12" />
 
+## Local database
+
+Create `.env` in the repo root or `app/backend/` and set `DATABASE_URL` (or `DB_*` vars). Use `.env.example` as a template.
