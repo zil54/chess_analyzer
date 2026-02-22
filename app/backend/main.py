@@ -108,21 +108,52 @@ except Exception as e:
     logger.warning(f"Database module could not be loaded: {e}")
 
 
-@app.post("/analyze")
-async def analyze(request: Request):
-    data = await request.json()
-    fen = data.get("fen", "")
+def parse_stockfish_line(fen: str, line: str) -> dict:
+    """
+    Parse a Stockfish analysis line and extract evaluation data.
+
+    Example line: "info depth 20 seldepth 25 multipv 1 score cp 25 nodes 1234567 nps 5000000 pv e2e4 e7e5 g1f3"
+
+    Returns: {fen, best_move, score_cp, score_mate, depth, pv, multipv}
+    """
+    import re
+
+    result = {'fen': fen}
+
     try:
-        result = run_stockfish(fen, lines=3)
-        if result is not None:
-            logger.info("Analyze generated successfully")
-            return result
-        else:
-            logger.error("Analyze generated but didn't produce result")
-            return {"error": "No analysis result"}
+        # Extract depth
+        depth_match = re.search(r'depth (\d+)', line)
+        if depth_match:
+            result['depth'] = int(depth_match.group(1))
+
+        # Extract multipv (which analysis line: 1, 2, or 3)
+        multipv_match = re.search(r'multipv (\d+)', line)
+        if multipv_match:
+            result['multipv'] = int(multipv_match.group(1))
+
+        # Extract score (either cp or mate)
+        cp_match = re.search(r'score cp (-?\d+)', line)
+        mate_match = re.search(r'score mate (-?\d+)', line)
+
+        if cp_match:
+            result['score_cp'] = int(cp_match.group(1))
+        elif mate_match:
+            result['score_mate'] = int(mate_match.group(1))
+
+        # Extract PV (principal variation)
+        pv_match = re.search(r'pv\s+(.+?)(?:\s+$|$)', line)
+        if pv_match:
+            pv_line = pv_match.group(1).strip()
+            moves = pv_line.split()
+            if moves:
+                result['best_move'] = moves[0]  # First move is the best move
+                result['pv'] = ' '.join(moves[:10])  # Store first 10 moves
+
     except Exception as e:
-        logger.exception("SF Run produced an error")
-        return {"error": str(e)}
+        logger.error(f"Error parsing Stockfish line: {e}")
+
+    return result
+
 
 
 @app.websocket("/ws/analyze")
@@ -141,11 +172,65 @@ async def analyze_ws(websocket: WebSocket):
         # Make sure any previous infinite search is stopped and its output is flushed
         await reset_stockfish_for_new_analysis(fen)
 
+        min_depth_for_storage = 15  # Only store when depth >= 15
+        lines_by_depth = {}  # Track all 3 lines per depth
+
         async for line in stream_stockfish(my_token):
             if not line:
                 continue
             if " pv " in line:
                 try:
+                    # Parse evaluation from line
+                    eval_data = parse_stockfish_line(fen, line)
+
+                    # Collect lines by depth using multipv as line number (1, 2, or 3)
+                    depth = eval_data.get('depth', 0)
+                    multipv = eval_data.get('multipv', 1)  # Default to 1 if not found
+
+                    if depth >= min_depth_for_storage:
+                        if depth not in lines_by_depth:
+                            lines_by_depth[depth] = {}
+
+                        # Store by multipv number (will create dict like {1: {...}, 2: {...}, 3: {...}})
+                        if multipv <= 3:  # Only store top 3
+                            lines_by_depth[depth][multipv] = {
+                                'best_move': eval_data.get('best_move'),
+                                'score_cp': eval_data.get('score_cp'),
+                                'score_mate': eval_data.get('score_mate'),
+                                'pv': eval_data.get('pv')
+                            }
+
+                    # Store to database when depth reaches minimum threshold
+                    if DB_ENABLED and eval_data.get('depth', 0) >= min_depth_for_storage:
+                        try:
+                            from app.backend.db.db import upsert_eval, store_analysis_lines
+
+                            # Store best eval
+                            await upsert_eval(
+                                fen=eval_data.get('fen'),
+                                best_move=eval_data.get('best_move'),
+                                score_cp=eval_data.get('score_cp'),
+                                score_mate=eval_data.get('score_mate'),
+                                depth=eval_data.get('depth'),
+                                pv=eval_data.get('pv')
+                            )
+
+                            # Store all 3 lines for this depth
+                            depth = eval_data.get('depth', 0)
+                            if depth in lines_by_depth and lines_by_depth[depth]:
+                                # Convert dict to list for store_analysis_lines
+                                lines_list = [lines_by_depth[depth].get(i) for i in range(1, 4) if i in lines_by_depth[depth]]
+                                if lines_list:
+                                    await store_analysis_lines(
+                                        fen=fen,
+                                        depth=depth,
+                                        lines=lines_list
+                                    )
+
+                            logger.info(f"Stored eval + {len(lines_by_depth.get(depth, {}))} lines: depth={depth}")
+                        except Exception as e:
+                            logger.error(f"Failed to store evaluation: {e}")
+
                     await websocket.send_text(line)
                 except WebSocketDisconnect:
                     logger.info("Client disconnected, stopping stream.")
@@ -157,6 +242,7 @@ async def analyze_ws(websocket: WebSocket):
                         stockfish.send("stop")
                         break
                     raise
+
     except WebSocketDisconnect:
         logger.info("WebSocket closed before analysis finished.")
         stockfish.send("stop")
