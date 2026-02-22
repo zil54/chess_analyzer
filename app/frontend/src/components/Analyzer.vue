@@ -79,6 +79,8 @@ export default {
       pendingDepth: null,
       pendingTimer: null,
       lastRenderedAt: 0,
+
+      gameId: null,
     };
   },
 
@@ -238,21 +240,54 @@ export default {
         formData.append("file", file);
 
         try {
-          const response = await fetch("http://localhost:8000/analyze_pgn", {
+          console.log("Uploading PGN to: http://localhost:8000/games");
+
+          // 1) Persist game + positions to DB
+          const createRes = await fetch("http://localhost:8000/games", {
             method: "POST",
             body: formData
           });
 
-          if (!response.ok) {
-            const error = await response.json();
-            alert(`Error: ${error.detail}`);
+          console.log("POST /games response status:", createRes.status);
+          console.log("POST /games response headers:", createRes.headers);
+
+          if (!createRes.ok) {
+            const error = await createRes.json();
+            console.error("Upload error:", error);
+            alert(`Error: ${error.detail || 'Failed to create game'}`);
             return;
           }
 
-          this.pgnData = await response.json();
+          const created = await createRes.json();
+          console.log("Game created with ID:", created.id);
+          this.gameId = created.id;
+
+          // 2) Load positions from DB
+          const movesRes = await fetch(`http://localhost:8000/games/${this.gameId}/moves`);
+          console.log("GET /games/{id}/moves response status:", movesRes.status);
+
+          if (!movesRes.ok) {
+            const error = await movesRes.json();
+            console.error("Load moves error:", error);
+            alert(`Error: ${error.detail || 'Failed to load moves'}`);
+            return;
+          }
+
+          const movesPayload = await movesRes.json();
+          console.log("Loaded positions:", movesPayload.total_moves);
+
+          this.pgnData = {
+            success: true,
+            headers: created.headers,
+            total_moves: movesPayload.total_moves,
+            positions: movesPayload.positions
+          };
+
           this.currentMove = 0;
-          this.showPosition(0);
+          await this.showPosition(0);
+          console.log("PGN upload successful");
         } catch (error) {
+          console.error("Upload exception:", error);
           alert(`Failed to upload PGN: ${error.message}`);
         }
       };
