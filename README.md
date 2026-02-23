@@ -202,8 +202,6 @@ pytest testing/ -k "pgn"
 - Depths 1-14: Streamed to UI only (not stored)
 - Depths 15+: Stored in database + streamed to UI
 
-## Troubleshooting
-
 ### "Database is NOT configured" Warning
 This is normal if you don't have PostgreSQL set up. The app works fine without it.
 
