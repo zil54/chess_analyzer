@@ -11,10 +11,23 @@ venv/
 node_modules/
 
 # Build outputs
-/dist/
+dist/
+**/dist/
+app/frontend/dist/
+
+# Large binaries
+app/engine/sf.exe
+*.exe
 
 # OS
 .DS_Store
 Thumbs.db
 
-app/engine/sf.exe
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Logs
+logs/
+*.log
