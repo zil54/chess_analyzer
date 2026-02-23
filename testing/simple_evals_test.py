@@ -4,7 +4,7 @@ Simple direct test - no async complexity
 Just test if data can be stored in evals table
 """
 import sys
-sys.path.insert(0, '.')
+sys.path.insert(0, '..')
 
 if sys.platform.startswith('win'):
     import asyncio

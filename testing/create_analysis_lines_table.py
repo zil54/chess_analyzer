@@ -5,7 +5,7 @@ This script creates the analysis_lines table to store all 3 analysis lines per p
 """
 import asyncio
 import sys
-sys.path.insert(0, '.')
+sys.path.insert(0, '..')
 
 if sys.platform.startswith('win'):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())

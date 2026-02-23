@@ -19,11 +19,11 @@ import sys
 print(__doc__)
 
 print("""
-STEP 1: In Terminal 1, start the backend
+STEP 2: In Terminal 2, run tests
 ────────────────────────────────────────────────────────────────────
 Run:
-  cd C:\\Users\\dimon\\PycharmProjects\\chess_analyzer
-  python -m app.backend.main
+  cd <project-root>
+  pytest testing/ -v
 
 Expected: Backend starts on http://127.0.0.1:8000
 

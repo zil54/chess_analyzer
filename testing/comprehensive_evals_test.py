@@ -4,7 +4,7 @@ Complete diagnostic test to verify evals table population
 This will help identify exactly where the problem is
 """
 import sys
-sys.path.insert(0, '.')
+sys.path.insert(0, '..')
 
 if sys.platform.startswith('win'):
     import asyncio

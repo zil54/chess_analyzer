@@ -6,7 +6,7 @@ import subprocess
 import asyncio
 import sys
 import time
-sys.path.insert(0, '.')
+sys.path.insert(0, '..')
 
 if sys.platform.startswith('win'):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())

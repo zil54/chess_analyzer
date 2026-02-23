@@ -4,7 +4,7 @@ Check analysis_lines - output to file so we can see results
 """
 import asyncio
 import sys
-sys.path.insert(0, '.')
+sys.path.insert(0, '..')
 
 if sys.platform.startswith('win'):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -77,7 +77,7 @@ async def main():
         output.append(traceback.format_exc())
 
     # Write to file
-    with open('analysis_lines_check.txt', 'w', encoding='utf-8') as f:
+    with open('../analysis_lines_check.txt', 'w', encoding='utf-8') as f:
         f.write('\n'.join(output))
 
     # Print to console

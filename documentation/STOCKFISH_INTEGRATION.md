@@ -250,14 +250,14 @@ In `.env` file:
 
 ```env
 # Database connection (required for caching)
-DATABASE_URL=postgresql://postgres:YUG0slavia@localhost:5432/chess_analyzer
+DATABASE_URL=postgresql://postgres:PASSWORD@localhost:5432/chess_analyzer
 
 # OR use individual components
 DB_HOST=localhost
 DB_PORT=5432
 DB_NAME=chess_analyzer
 DB_USER=postgres
-DB_PASSWORD=YUG0slavia
+DB_PASSWORD=YOUR_PASSWORD
 ```
 
 If `DATABASE_URL` is not set:

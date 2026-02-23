@@ -32,7 +32,7 @@ STEP 2: START BACKEND
 ────────────────────────────────────────────────────────────────────
 Open Terminal 1 and run:
 
-  cd C:\\Users\\dimon\\PycharmProjects\\chess_analyzer
+  cd <project-root>
   python -m app.backend.main
 
 Wait for message:
@@ -45,7 +45,7 @@ STEP 3: RUN DIAGNOSTIC TEST
 ────────────────────────────────────────────────────────────────────
 Open Terminal 2 and run:
 
-  cd C:\\Users\\dimon\\PycharmProjects\\chess_analyzer
+  cd <project-root>
   python comprehensive_evals_test.py
 
 This will:
