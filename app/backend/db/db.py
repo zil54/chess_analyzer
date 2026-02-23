@@ -287,11 +287,11 @@ async def upsert_eval(
                     """,
                     (fen, best_move, score_cp, score_mate, depth, pv),
                 )
-                logger.info(f"✓ Upsert query executed")
+                logger.info("[OK] Upsert query executed")
             await conn.commit()
-            logger.info(f"✓ Changes committed to DB")
+            logger.info("[OK] Changes committed to DB")
     except Exception as e:
-        logger.error(f"✗ Error upserting eval: {e}", exc_info=True)
+        logger.error("[ERROR] Error upserting eval: {0}".format(e), exc_info=True)
         raise
 
 

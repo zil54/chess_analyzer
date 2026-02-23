@@ -234,21 +234,33 @@ async def analyze_ws(websocket: WebSocket):
                     await websocket.send_text(line)
                 except WebSocketDisconnect:
                     logger.info("Client disconnected, stopping stream.")
-                    stockfish.send("stop")
+                    try:
+                        stockfish.send("stop")
+                    except (OSError, ValueError):
+                        pass  # Pipe already closed
                     break
                 except RuntimeError as e:
                     if "Cannot call \"send\"" in str(e):
                         logger.info("Tried to send after close, stopping stream.")
-                        stockfish.send("stop")
+                        try:
+                            stockfish.send("stop")
+                        except (OSError, ValueError):
+                            pass  # Pipe already closed
                         break
                     raise
 
     except WebSocketDisconnect:
         logger.info("WebSocket closed before analysis finished.")
-        stockfish.send("stop")
+        try:
+            stockfish.send("stop")
+        except (OSError, ValueError):
+            pass  # Pipe already closed
     except Exception as e:
         logger.error("Unexpected error: %s", e)
-        stockfish.send("stop")
+        try:
+            stockfish.send("stop")
+        except (OSError, ValueError):
+            pass  # Pipe already closed
 
 
 async def reset_stockfish_for_new_analysis(fen: str):

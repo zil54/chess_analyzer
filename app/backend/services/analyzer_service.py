@@ -200,7 +200,7 @@ async def analyze_position(
                 depth=eval_result.get("depth"),
                 pv=eval_result.get("pv")
             )
-            logger.info(f"✓ Stored evaluation in DB for FEN: {fen[:40]}...")
+            logger.info("[OK] Stored evaluation in DB for FEN: {0}...".format(fen[:40]))
         except Exception as e:
             logger.error(f"Error storing evaluation in DB: {e}", exc_info=True)
 
