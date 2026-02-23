@@ -1,8 +1,18 @@
+import sys
+import os
+
+# CRITICAL: Set Windows event loop policy BEFORE any asyncio imports or uvicorn startup
+# This must happen at the very top before anything else creates an event loop
+if sys.platform.startswith("win"):
+    import asyncio
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-import sys
-import os
+import asyncio
+from contextlib import asynccontextmanager
+
 
 # Add parent directories to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,11 +33,30 @@ except ImportError:
 
 from fastapi.staticfiles import StaticFiles
 import uvicorn
-import asyncio
 import platform
 import shutil
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+
+    # Ensure DB schema exists if configured.
+    try:
+        from app.backend.db.db import DB_ENABLED, init_db
+        if DB_ENABLED:
+            await init_db()
+            logger.info("DB schema ensured (games/moves/evals)")
+        else:
+            logger.warning(
+                "Database is NOT configured. PGN upload will not persist to DB. Set DATABASE_URL in .env to enable"
+            )
+    except Exception as e:
+        logger.warning(f"DB schema init failed: {e}")
+
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+
 app.include_router(router)
 
 # CORS for frontend access
