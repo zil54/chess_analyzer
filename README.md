@@ -68,7 +68,7 @@ python -m venv .venv
 pip install -r app/backend/requirements.txt
 
 # Optional: Configure database in .env
-# DATABASE_URL=postgresql://postgres:YUG0slavia@localhost:5432/chess_analyzer
+# DATABASE_URL=postgresql://postgres:<your password>@localhost:5432/chess_analyzer
 ```
 
 ### 2. Setup Frontend
@@ -147,7 +147,7 @@ Create a `.env` file in the project root:
 
 ```env
 # Database configuration (optional)
-DATABASE_URL=postgresql://postgres:YUG0slavia@localhost:5432/chess_analyzer
+DATABASE_URL=postgresql://postgres:<your password>@localhost:5432/chess_analyzer
 
 # Log level
 LOG_LEVEL=INFO
@@ -254,9 +254,6 @@ When adding features:
 3. Follow existing code style and patterns
 4. Test both with and without database
 
-## License
-
-[Add your license here]
 
 ## Support
 
