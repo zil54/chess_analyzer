@@ -43,7 +43,7 @@
 
 ### Full Setup (Database Required for All Features)
 ```env
-DATABASE_URL=postgresql://postgres:PASSWORD@localhost:5432/chess_analyzer
+DATABASE_URL=postgresql://postgres:your password@localhost:5432/chess_analyzer
 ```
 
 **Result:**
