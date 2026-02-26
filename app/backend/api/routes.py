@@ -399,3 +399,178 @@ async def health_db():
         return {"ok": bool(ok), "db_enabled": True}
     except Exception as e:
         return {"ok": False, "db_enabled": True, "detail": str(e)}
+
+@router.post("/analyze")
+async def analyze_position(request: Request):
+    """
+    Analyze a chess position using Stockfish with caching.
+
+    Cache-then-compute pattern:
+    1. Check if evaluation exists in DB (cache hit)
+    2. If not found, run Stockfish (cache miss)
+    3. Store result in DB
+    4. Return evaluation
+
+    Request body (JSON):
+    {
+        "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        "depth": 20,              // optional, default 20
+        "time_limit": 0.5,        // optional, default 0.5 seconds
+        "force_recompute": false  // optional, skip cache if true
+    }
+
+    Response:
+    {
+        "fen": "...",
+        "best_move": "e2e4",
+        "score_cp": 20,           // centipawn score (null if mate)
+        "score_mate": null,       // mate in N (null if not mate)
+        "depth": 20,
+        "pv": "e2e4 e7e5 g1f3",
+        "cached": true,
+        "created_at": "2026-02-21T12:00:00"  // only if cached
+    }
+    """
+    try:
+        from app.backend.services.analyzer_service import analyze_position
+
+        data = await request.json()
+        fen = data.get("fen", "").strip()
+        depth = int(data.get("depth", 20))
+        time_limit = float(data.get("time_limit", 0.5))
+        force_recompute = bool(data.get("force_recompute", False))
+
+        if not fen:
+            raise HTTPException(status_code=400, detail="FEN is required")
+
+        result = await analyze_position(
+            fen=fen,
+            depth=depth,
+            time_limit=time_limit,
+            force_recompute=force_recompute
+        )
+
+        if "error" in result:
+            logger.error(f"Analysis error: {result['error']}")
+            raise HTTPException(status_code=400, detail=result["error"])
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in /analyze endpoint: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+
+@router.post("/games/{game_id}/analyze")
+async def batch_analyze_game(game_id: int, request: Request):
+    """
+    Batch analyze all positions (FENs) from an uploaded game.
+
+    This endpoint:
+    1. Fetches all moves from the game
+    2. Analyzes each FEN with Stockfish
+    3. Stores evaluations in the evals table
+    4. Returns progress/results
+
+    Query parameters (optional):
+    - depth: Search depth (default 20)
+    - time_limit: Time per position in seconds (default 0.5)
+
+    Request body (optional):
+    {
+        "depth": 20,
+        "time_limit": 0.5
+    }
+
+    Response:
+    {
+        "success": true,
+        "game_id": 1,
+        "total_positions": 50,
+        "analyzed": 45,
+        "cached": 5,
+        "errors": 0,
+        "total_time_seconds": 12.5,
+        "message": "Analyzed 45 new positions, 5 from cache"
+    }
+    """
+    if not DB_ENABLED:
+        raise HTTPException(status_code=503, detail="Database not configured.")
+
+    try:
+        from app.backend.services.analyzer_service import analyze_position
+
+        # Get parameters from body or query
+        try:
+            body = await request.json()
+            depth = int(body.get("depth", 20))
+            time_limit = float(body.get("time_limit", 0.5))
+        except Exception:
+            # Try query params if no body
+            depth = 20
+            time_limit = 0.5
+
+        # Fetch all moves for this game
+        rows = await get_moves(game_id)
+        if not rows:
+            raise HTTPException(status_code=404, detail=f"Game {game_id} not found or has no moves")
+
+        logger.info(f"Batch analyzing {len(rows)} positions for game {game_id}")
+
+        analyzed_count = 0
+        cached_count = 0
+        error_count = 0
+        import time
+        start_time = time.time()
+
+        # Analyze each position
+        for row in rows:
+            fen = row.get("fen")
+            if not fen:
+                continue
+
+            try:
+                result = await analyze_position(
+                    fen=fen,
+                    depth=depth,
+                    time_limit=time_limit,
+                    force_recompute=False  # Use cache if available
+                )
+
+                if "error" not in result:
+                    if result.get("cached"):
+                        cached_count += 1
+                    else:
+                        analyzed_count += 1
+                    logger.debug(f"Analyzed FEN: {fen[:30]}...")
+                else:
+                    error_count += 1
+                    logger.warning(f"Error analyzing FEN: {result.get('error')}")
+
+            except Exception as e:
+                error_count += 1
+                logger.error(f"Exception analyzing FEN: {e}")
+
+        elapsed = time.time() - start_time
+
+        logger.info(
+            f"Batch analysis complete: analyzed={analyzed_count}, cached={cached_count}, errors={error_count}, time={elapsed:.2f}s"
+        )
+
+        return {
+            "success": True,
+            "game_id": game_id,
+            "total_positions": len(rows),
+            "analyzed": analyzed_count,
+            "cached": cached_count,
+            "errors": error_count,
+            "total_time_seconds": round(elapsed, 2),
+            "message": f"Analyzed {analyzed_count} new positions, {cached_count} from cache"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in batch analysis: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Batch analysis failed: {str(e)}")

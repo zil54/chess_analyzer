@@ -131,6 +131,22 @@ async def init_db():
                 );
                 """
             )
+            await cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS public.analysis_lines (
+                    fen TEXT NOT NULL,
+                    depth INT NOT NULL,
+                    line_number INT NOT NULL,
+                    best_move TEXT,
+                    score_cp INT,
+                    score_mate INT,
+                    pv TEXT,
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (fen, depth, line_number),
+                    FOREIGN KEY (fen) REFERENCES public.evals(fen)
+                );
+                """
+            )
         await conn.commit()
 
 
@@ -223,23 +239,172 @@ async def upsert_eval(
     depth: int | None = None,
     pv: str | None = None,
 ) -> None:
-    async with await get_connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                INSERT INTO public.evals (fen, best_move, score_cp, score_mate, depth, pv)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (fen) DO UPDATE SET
-                    best_move = EXCLUDED.best_move,
-                    score_cp = EXCLUDED.score_cp,
-                    score_mate = EXCLUDED.score_mate,
-                    depth = EXCLUDED.depth,
-                    pv = EXCLUDED.pv,
-                    created_at = NOW()
-                """,
-                (fen, best_move, score_cp, score_mate, depth, pv),
-            )
-        await conn.commit()
+    """
+    Insert or update evaluation for a FEN position.
+
+    Only updates if:
+    - FEN not in table (new), OR
+    - New depth >= existing depth (deeper or equal analysis)
+
+    Never overwrites with shallower analysis.
+    """
+    import logging
+    logger = logging.getLogger("chess-analyzer")
+
+    try:
+        async with await get_connection() as conn:
+            async with conn.cursor() as cur:
+                logger.info(f"Upserting eval: fen={fen[:40]}... best_move={best_move} score_cp={score_cp} depth={depth}")
+
+                # Check if FEN already exists and compare depths
+                await cur.execute(
+                    "SELECT depth FROM public.evals WHERE fen = %s;",
+                    (fen,)
+                )
+                existing = await cur.fetchone()
+
+                if existing:
+                    existing_depth = existing['depth'] if existing else None
+
+                    if existing_depth and depth and depth < existing_depth:
+                        logger.info(f"Skipping update: new depth {depth} < existing depth {existing_depth}")
+                        return
+
+                    logger.info(f"Updating eval: new depth {depth} >= existing {existing_depth}")
+
+                # Insert or update
+                await cur.execute(
+                    """
+                    INSERT INTO public.evals (fen, best_move, score_cp, score_mate, depth, pv)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (fen) DO UPDATE SET
+                        best_move = EXCLUDED.best_move,
+                        score_cp = EXCLUDED.score_cp,
+                        score_mate = EXCLUDED.score_mate,
+                        depth = EXCLUDED.depth,
+                        pv = EXCLUDED.pv,
+                        created_at = NOW()
+                    """,
+                    (fen, best_move, score_cp, score_mate, depth, pv),
+                )
+                logger.info("[OK] Upsert query executed")
+            await conn.commit()
+            logger.info("[OK] Changes committed to DB")
+    except Exception as e:
+        logger.error("[ERROR] Error upserting eval: {0}".format(e), exc_info=True)
+        raise
+
+
+async def store_analysis_lines(
+    fen: str,
+    depth: int,
+    lines: list[dict]
+) -> None:
+    """
+    Store multiple analysis lines (e.g., top 3 variations) for a position at a specific depth.
+
+    Args:
+        fen: FEN position
+        depth: Analysis depth
+        lines: List of dicts with {best_move, score_cp, score_mate, pv}
+    """
+    import logging
+    logger = logging.getLogger("chess-analyzer")
+
+    try:
+        async with await get_connection() as conn:
+            async with conn.cursor() as cur:
+                # First ensure evals entry exists with this depth
+                await cur.execute(
+                    "SELECT depth FROM public.evals WHERE fen = %s;",
+                    (fen,)
+                )
+                existing = await cur.fetchone()
+                existing_depth = existing['depth'] if existing else 0
+
+                # Only store if depth >= 15 and >= existing
+                if depth < 15:
+                    logger.info(f"Skipping lines storage: depth {depth} < 15")
+                    return
+
+                if existing_depth and depth < existing_depth:
+                    logger.info(f"Skipping lines storage: depth {depth} < existing {existing_depth}")
+                    return
+
+                # Store all lines (up to 3)
+                for line_num, line_data in enumerate(lines[:3], 1):
+                    await cur.execute(
+                        """
+                        INSERT INTO public.analysis_lines (fen, depth, line_number, best_move, score_cp, score_mate, pv)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (fen, depth, line_number) DO UPDATE SET
+                            best_move = EXCLUDED.best_move,
+                            score_cp = EXCLUDED.score_cp,
+                            score_mate = EXCLUDED.score_mate,
+                            pv = EXCLUDED.pv,
+                            updated_at = NOW()
+                        """,
+                        (
+                            fen,
+                            depth,
+                            line_num,
+                            line_data.get('best_move'),
+                            line_data.get('score_cp'),
+                            line_data.get('score_mate'),
+                            line_data.get('pv')
+                        ),
+                    )
+
+                logger.info(f"Stored {len(lines[:3])} analysis lines at depth {depth}")
+
+            await conn.commit()
+            logger.info(f"Analysis lines committed to DB")
+    except Exception as e:
+        logger.error(f"Error storing analysis lines: {e}", exc_info=True)
+        raise
+
+
+async def get_analysis_lines(fen: str, depth: int | None = None) -> list[dict]:
+    """
+    Get analysis lines for a position.
+
+    Args:
+        fen: FEN position
+        depth: Optional - if specified, get lines at this depth only
+
+    Returns:
+        List of analysis lines sorted by line_number
+    """
+    try:
+        async with await get_connection() as conn:
+            async with conn.cursor() as cur:
+                if depth:
+                    await cur.execute(
+                        """
+                        SELECT fen, depth, line_number, best_move, score_cp, score_mate, pv, updated_at
+                        FROM public.analysis_lines
+                        WHERE fen = %s AND depth = %s
+                        ORDER BY line_number ASC
+                        """,
+                        (fen, depth),
+                    )
+                else:
+                    await cur.execute(
+                        """
+                        SELECT fen, depth, line_number, best_move, score_cp, score_mate, pv, updated_at
+                        FROM public.analysis_lines
+                        WHERE fen = %s
+                        ORDER BY depth DESC, line_number ASC
+                        """,
+                        (fen,),
+                    )
+                rows = await cur.fetchall()
+        return rows or []
+    except Exception as e:
+        import logging
+        logger = logging.getLogger("chess-analyzer")
+        logger.error(f"Error getting analysis lines: {e}")
+        return []
 
 
 async def get_eval(fen: str) -> Optional[dict]:
