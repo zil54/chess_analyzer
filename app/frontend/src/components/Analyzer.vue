@@ -286,6 +286,31 @@ export default {
           this.currentMove = 0;
           await this.showPosition(0);
           console.log("PGN upload successful");
+
+          // 3) Batch analyze all positions (store evaluations in evals table)
+          console.log("Starting batch analysis of all positions...");
+          try {
+            const analyzeRes = await fetch(`http://localhost:8000/games/${this.gameId}/analyze`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                depth: 15,
+                time_limit: 1.0
+              })
+            });
+
+            if (analyzeRes.ok) {
+              const analyzeResult = await analyzeRes.json();
+              console.log("✓ Batch analysis complete:", analyzeResult);
+              const msg = `Analyzed ${analyzeResult.analyzed} new positions, ${analyzeResult.cached} from cache in ${analyzeResult.total_time_seconds}s`;
+              console.log(msg);
+            } else {
+              const error = await analyzeRes.json();
+              console.warn("Batch analysis skipped:", error.detail);
+            }
+          } catch (analyzeErr) {
+            console.warn("Batch analysis not available:", analyzeErr.message);
+          }
         } catch (error) {
           console.error("Upload exception:", error);
           alert(`Failed to upload PGN: ${error.message}`);
@@ -344,6 +369,8 @@ export default {
       if (this.pvLines.length === 0) return;
 
       const linesByDepth = {};
+      // Display all depths (1+), but database only stores depth >= 15
+
       for (const line of this.pvLines) {
         const depthMatch = line.match(/depth (\d+)/);
         const scoreMatch = line.match(/score (cp|mate) (-?\d+)/);
@@ -351,12 +378,12 @@ export default {
 
         if (depthMatch && scoreMatch) {
           const depth = parseInt(depthMatch[1]);
+
           if (!linesByDepth[depth]) {
             linesByDepth[depth] = [];
           }
-          if (linesByDepth[depth].length < 3) {
-            // Normalize evaluation so it's always from White's perspective.
-            // In UCI, scores are reported from the side-to-move's perspective.
+          if (linesByDepth[depth].length < 3) {  // Keep all 3 lines
+            // ...existing code...
             const fenParts = (this.fen || "").trim().split(/\s+/);
             const sideToMove = fenParts.length >= 2 ? fenParts[1] : 'w';
             const sign = sideToMove === 'b' ? -1 : 1;
