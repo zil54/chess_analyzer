@@ -3,7 +3,6 @@
 Demonstration: App features that work WITHOUT a database
 """
 import requests
-import json
 
 print("\n" + "="*80)
 print("CHESS ANALYZER - NO DATABASE REQUIRED FEATURES")
@@ -62,13 +61,49 @@ try:
 except Exception as e:
     print(f"✗ Error: {e}")
 
-# Feature 4: Database-Dependent Features (Will fail without DB)
-print("\n[FEATURE 4] Database-Dependent Endpoints (Graceful Degradation)")
+# Feature 4: PGN Upload Without DB
+print("\n[FEATURE 4] PGN Upload Works Without Database")
+print("-" * 60)
+
+sample_pgn = """[Event \"Test\"]
+[Site \"Local\"]
+[Date \"2026.03.10\"]
+[Round \"-\"]
+[White \"WhitePlayer\"]
+[Black \"BlackPlayer\"]
+[Result \"1-0\"]
+
+1. e4 e5 2. Nf3 Nc6 1-0
+"""
+
+try:
+    response = requests.post(
+        f"{BASE_URL}/games",
+        files={"file": ("game.pgn", sample_pgn.encode("utf-8"), "application/x-chess-pgn")},
+        timeout=10,
+    )
+    if response.status_code == 200:
+        payload = response.json()
+        print("✓ SUCCESS: PGN upload accepted without DB")
+        print(f"  Game ID: {payload.get('id')}")
+        print(f"  Total moves: {payload.get('total_moves')}")
+        print(f"  Positions returned: {len(payload.get('positions', []))}")
+    else:
+        print(f"✗ Failed: {response.status_code}")
+        try:
+            print(f"  Message: {response.json().get('detail', response.text)}")
+        except Exception:
+            print(f"  Message: {response.text[:120]}")
+except Exception as e:
+    print(f"✗ Error: {e}")
+
+# Feature 5: Database-Dependent Features (Will still fail without DB)
+print("\n[FEATURE 5] Database-Dependent Endpoints (Graceful Degradation)")
 print("-" * 60)
 
 endpoints_needing_db = [
     ("GET", "/games", "List all games"),
-    ("GET", "/games/1/moves", "Get moves for game"),
+    ("GET", "/games/1/moves", "Get moves for stored DB game"),
     ("GET", "/evals?fen=rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR%20w%20KQkq%20-%200%201", "Get evaluation cache"),
 ]
 
@@ -89,8 +124,8 @@ for method, endpoint, description in endpoints_needing_db:
     except Exception as e:
         print(f"✗ {description}: {str(e)[:60]}")
 
-# Feature 5: Live Analysis (WebSocket)
-print("\n[FEATURE 5] Live Stockfish Analysis (No DB required)")
+# Feature 6: Live Analysis (WebSocket)
+print("\n[FEATURE 6] Live Stockfish Analysis (No DB required)")
 print("-" * 60)
 print("✓ WebSocket /ws/analyze - Real-time engine evaluation")
 print("  This endpoint works without database")
@@ -110,16 +145,16 @@ The Chess Analyzer app has:
    • Frontend UI (Vue.js application)
    • FEN input and manipulation
    • Real-time evaluation streaming
+   • PGN upload and move navigation
 
 ❌ REQUIRES DATABASE:
-   • PGN file persistence
+   • PGN persistence/history
    • Game library/history
    • Session tracking
    • Evaluation caching
-   • Move history retrieval
+   • Move history retrieval from stored games
 
-CONCLUSION: The app is FULLY FUNCTIONAL without a database for core
-chess analysis features. Add a database only when you need persistent storage.
+CONCLUSION: The app is fully functional without a database for core
+chess analysis and PGN exploration. Add a database only when you need persistent storage.
 """)
 print("="*80 + "\n")
-

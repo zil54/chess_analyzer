@@ -12,8 +12,8 @@ idna==3.11
 iniconfig==2.3.0
 packaging==25.0
 pluggy==1.6.0
-psycopg==3.2.11
-psycopg-binary==3.2.11
+psycopg==3.2.11  # Optional: for database support
+psycopg-binary==3.2.11  # Optional: for database support
 pydantic==2.12.3
 pydantic_core==2.41.4
 Pygments==2.19.2

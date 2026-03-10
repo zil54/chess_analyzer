@@ -228,6 +228,45 @@ export default {
       this.pendingDepth = null;
     },
 
+    stringifyError(error, fallback = "Unknown error") {
+      if (!error) return fallback;
+      if (typeof error === "string") return error;
+      if (error instanceof Error) return error.message || fallback;
+      if (Array.isArray(error)) {
+        const parts = error
+          .map((item) => this.stringifyError(item, ""))
+          .filter(Boolean);
+        return parts.length ? parts.join("; ") : fallback;
+      }
+      if (typeof error === "object") {
+        if (typeof error.detail === "string") return error.detail;
+        if (error.detail) return this.stringifyError(error.detail, fallback);
+        if (typeof error.message === "string") return error.message;
+        try {
+          return JSON.stringify(error);
+        } catch (_) {
+          return fallback;
+        }
+      }
+      return String(error);
+    },
+
+    async readErrorResponse(response, fallback) {
+      try {
+        const contentType = response.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+          const payload = await response.json();
+          return this.stringifyError(payload, fallback);
+        }
+
+        const text = await response.text();
+        return text || fallback;
+      } catch (error) {
+        console.error("Error reading response payload:", error);
+        return fallback;
+      }
+    },
+
     async uploadPGN() {
       const fileInput = document.createElement("input");
       fileInput.type = "file";
@@ -242,78 +281,89 @@ export default {
         try {
           console.log("Uploading PGN to: http://localhost:8000/games");
 
-          // 1) Persist game + positions to DB
           const createRes = await fetch("http://localhost:8000/games", {
             method: "POST",
             body: formData
           });
 
           console.log("POST /games response status:", createRes.status);
-          console.log("POST /games response headers:", createRes.headers);
 
           if (!createRes.ok) {
-            const error = await createRes.json();
-            console.error("Upload error:", error);
-            alert(`Error: ${error.detail || 'Failed to create game'}`);
+            const errorMsg = await this.readErrorResponse(createRes, "Failed to upload PGN");
+            console.error("Upload error:", errorMsg);
+            alert(`Error: ${errorMsg}`);
             return;
           }
 
           const created = await createRes.json();
-          console.log("Game created with ID:", created.id);
-          this.gameId = created.id;
+          console.log("POST /games payload:", created);
 
-          // 2) Load positions from DB
-          const movesRes = await fetch(`http://localhost:8000/games/${this.gameId}/moves`);
-          console.log("GET /games/{id}/moves response status:", movesRes.status);
+          let pgnData;
+          this.gameId = created.id ?? null;
 
-          if (!movesRes.ok) {
-            const error = await movesRes.json();
-            console.error("Load moves error:", error);
-            alert(`Error: ${error.detail || 'Failed to load moves'}`);
-            return;
+          if (Array.isArray(created.positions)) {
+            pgnData = {
+              success: true,
+              headers: created.headers,
+              total_moves: created.total_moves,
+              positions: created.positions
+            };
+          } else if (this.gameId != null) {
+            const movesRes = await fetch(`http://localhost:8000/games/${this.gameId}/moves`);
+            console.log("GET /games/{id}/moves response status:", movesRes.status);
+
+            if (!movesRes.ok) {
+              const errorMsg = await this.readErrorResponse(movesRes, "Failed to load moves");
+              console.error("Load moves error:", errorMsg);
+              alert(`Error: ${errorMsg}`);
+              return;
+            }
+
+            const movesPayload = await movesRes.json();
+            console.log("Loaded positions:", movesPayload.total_moves);
+
+            pgnData = {
+              success: true,
+              headers: created.headers,
+              total_moves: movesPayload.total_moves,
+              positions: movesPayload.positions
+            };
+          } else {
+            throw new Error("Upload succeeded but no positions were returned.");
           }
 
-          const movesPayload = await movesRes.json();
-          console.log("Loaded positions:", movesPayload.total_moves);
-
-          this.pgnData = {
-            success: true,
-            headers: created.headers,
-            total_moves: movesPayload.total_moves,
-            positions: movesPayload.positions
-          };
-
+          this.pgnData = pgnData;
           this.currentMove = 0;
           await this.showPosition(0);
           console.log("PGN upload successful");
 
-          // 3) Batch analyze all positions (store evaluations in evals table)
-          console.log("Starting batch analysis of all positions...");
-          try {
-            const analyzeRes = await fetch(`http://localhost:8000/games/${this.gameId}/analyze`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                depth: 15,
-                time_limit: 1.0
-              })
-            });
+          if (this.gameId != null) {
+            console.log("Starting batch analysis of all positions...");
+            try {
+              const analyzeRes = await fetch(`http://localhost:8000/games/${this.gameId}/analyze`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  depth: 15,
+                  time_limit: 1.0
+                })
+              });
 
-            if (analyzeRes.ok) {
-              const analyzeResult = await analyzeRes.json();
-              console.log("✓ Batch analysis complete:", analyzeResult);
-              const msg = `Analyzed ${analyzeResult.analyzed} new positions, ${analyzeResult.cached} from cache in ${analyzeResult.total_time_seconds}s`;
-              console.log(msg);
-            } else {
-              const error = await analyzeRes.json();
-              console.warn("Batch analysis skipped:", error.detail);
+              if (analyzeRes.ok) {
+                const analyzeResult = await analyzeRes.json();
+                console.log("✓ Batch analysis complete:", analyzeResult);
+              } else {
+                const errorMsg = await this.readErrorResponse(analyzeRes, "Batch analysis skipped");
+                console.warn("Batch analysis skipped:", errorMsg);
+              }
+            } catch (analyzeErr) {
+              console.warn("Batch analysis not available:", this.stringifyError(analyzeErr, "Unknown error"));
             }
-          } catch (analyzeErr) {
-            console.warn("Batch analysis not available:", analyzeErr.message);
           }
         } catch (error) {
+          const errorMsg = this.stringifyError(error, "Failed to upload PGN");
           console.error("Upload exception:", error);
-          alert(`Failed to upload PGN: ${error.message}`);
+          alert(`Error: ${errorMsg}`);
         }
       };
       fileInput.click();
@@ -383,7 +433,6 @@ export default {
             linesByDepth[depth] = [];
           }
           if (linesByDepth[depth].length < 3) {  // Keep all 3 lines
-            // ...existing code...
             const fenParts = (this.fen || "").trim().split(/\s+/);
             const sideToMove = fenParts.length >= 2 ? fenParts[1] : 'w';
             const sign = sideToMove === 'b' ? -1 : 1;

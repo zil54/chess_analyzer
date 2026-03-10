@@ -18,68 +18,86 @@ load_dotenv(dotenv_path=_ROOT_DOTENV_PATH, override=False)
 load_dotenv(dotenv_path=_BACKEND_DOTENV_PATH, override=False)
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-if not DATABASE_URL:
-    pytest.skip("DATABASE_URL is not set; skipping DB-dependent tests.", allow_module_level=True)
+
+def pytest_collection_modifyitems(config, items):
+    if DATABASE_URL:
+        return
+
+    skip_db = pytest.mark.skip(reason="DATABASE_URL is not set; skipping DB-dependent tests.")
+    for item in items:
+        path_str = str(getattr(item, "fspath", ""))
+        nodeid = getattr(item, "nodeid", "")
+        if "no_db" in path_str or "no_db" in nodeid:
+            continue
+        item.add_marker(skip_db)
+
 
 @pytest_asyncio.fixture(scope="session")
 async def db_conn():
     """
     Provide a shared async connection for the test session.
     """
+    if not DATABASE_URL:
+        pytest.skip("DATABASE_URL is not set; skipping DB-dependent test fixture.")
     async with await psycopg.AsyncConnection.connect(DATABASE_URL, row_factory=dict_row) as conn:
         yield conn
 
 
 @pytest_asyncio.fixture(scope="session", autouse=True)
-async def prepare_schema(db_conn):
+async def prepare_schema():
     """Ensure required tables exist for tests.
 
     IMPORTANT: Don't DROP SCHEMA in a dev database.
     """
-    async with db_conn.cursor() as cur:
-        await cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS public.games (
-                id SERIAL PRIMARY KEY,
-                raw_pgn TEXT,
-                white TEXT,
-                black TEXT,
-                result TEXT,
-                event TEXT,
-                site TEXT,
-                date TEXT
-            );
-            """
-        )
-        await cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS public.moves (
-                id SERIAL PRIMARY KEY,
-                game_id INT REFERENCES public.games(id),
-                ply INT NOT NULL,
-                san TEXT NOT NULL,
-                fen TEXT NOT NULL,
-                comment TEXT,
-                cp_tag BOOLEAN DEFAULT FALSE,
-                color CHAR(1) GENERATED ALWAYS AS (
-                    CASE WHEN ply % 2 = 1 THEN 'W' ELSE 'B' END
-                ) STORED,
-                UNIQUE (game_id, ply)
-            );
-            """
-        )
-        await cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS public.evals (
-                fen TEXT PRIMARY KEY,
-                best_move TEXT,
-                score_cp INT,
-                score_mate INT,
-                depth INT,
-                pv TEXT,
-                created_at TIMESTAMP DEFAULT NOW()
-            );
-            """
-        )
-        await db_conn.commit()
+    if not DATABASE_URL:
+        yield
+        return
+
+    async with await psycopg.AsyncConnection.connect(DATABASE_URL, row_factory=dict_row) as db_conn:
+        async with db_conn.cursor() as cur:
+            await cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS public.games (
+                    id SERIAL PRIMARY KEY,
+                    raw_pgn TEXT,
+                    white TEXT,
+                    black TEXT,
+                    result TEXT,
+                    event TEXT,
+                    site TEXT,
+                    date TEXT
+                );
+                """
+            )
+            await cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS public.moves (
+                    id SERIAL PRIMARY KEY,
+                    game_id INT REFERENCES public.games(id),
+                    ply INT NOT NULL,
+                    san TEXT NOT NULL,
+                    fen TEXT NOT NULL,
+                    comment TEXT,
+                    cp_tag BOOLEAN DEFAULT FALSE,
+                    color CHAR(1) GENERATED ALWAYS AS (
+                        CASE WHEN ply % 2 = 1 THEN 'W' ELSE 'B' END
+                    ) STORED,
+                    UNIQUE (game_id, ply)
+                );
+                """
+            )
+            await cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS public.evals (
+                    fen TEXT PRIMARY KEY,
+                    best_move TEXT,
+                    score_cp INT,
+                    score_mate INT,
+                    depth INT,
+                    pv TEXT,
+                    created_at TIMESTAMP DEFAULT NOW()
+                );
+                """
+            )
+            await db_conn.commit()
     yield

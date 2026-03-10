@@ -1,10 +1,18 @@
 import sys
 import asyncio
 import os
-import psycopg
-from psycopg.rows import dict_row
 from dotenv import load_dotenv, find_dotenv
 from typing import Optional, Any
+
+# -------------------------------------------------------------------
+# Optional psycopg import for database functionality
+# -------------------------------------------------------------------
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+    PSYCOPG_AVAILABLE = True
+except ImportError:
+    PSYCOPG_AVAILABLE = False
 
 # -------------------------------------------------------------------
 # Windows event loop fix
@@ -57,12 +65,15 @@ def _build_database_url_from_parts() -> Optional[str]:
 
 
 DATABASE_URL = os.getenv("DATABASE_URL") or _build_database_url_from_parts()
-DB_ENABLED = bool(DATABASE_URL)
+DB_ENABLED = bool(DATABASE_URL) and PSYCOPG_AVAILABLE
 
 # -------------------------------------------------------------------
 # Connection helper
 # -------------------------------------------------------------------
 async def get_connection():
+    if not PSYCOPG_AVAILABLE:
+        raise RuntimeError("psycopg library is not installed. Install it with: pip install psycopg[binary]")
+
     url = DATABASE_URL
     if not url:
         raise RuntimeError(
