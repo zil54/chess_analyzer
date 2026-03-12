@@ -261,15 +261,30 @@ export default {
       const workerDepth = Number(payload?.worker_depth ?? displayDepth) || displayDepth;
       const workerTarget = Number(payload?.worker_target_depth ?? displayTarget) || displayTarget;
 
-      if (payload?.type === "status" && payload?.message) {
-        return payload.message;
-      }
-
       if (!displayDepth && !workerDepth) {
-        return sourceLabel;
+        return payload?.message || sourceLabel;
       }
 
-      return `${sourceLabel}: showing depth ${displayDepth}/${displayTarget} · worker ${workerDepth}/${workerTarget}`;
+      const displayText = displayDepth > displayTarget
+        ? `showing depth ${displayDepth} (requested ${displayTarget})`
+        : `showing depth ${displayDepth}/${displayTarget}`;
+      const workerText = `worker ${workerDepth}/${workerTarget}`;
+      const progressText = `${displayText} · ${workerText}`;
+      if (payload?.type === "status" && payload?.message) {
+        return `${payload.message} · ${progressText}`;
+      }
+
+      return `${sourceLabel} · ${progressText}`;
+    },
+
+    statusLabel(status) {
+      const labels = {
+        analysis_started: "Live analysis",
+        analysis_running: "Live analysis",
+        complete: "Analysis complete",
+        idle: "Analysis idle",
+      };
+      return labels[String(status || "")] || "Analysis";
     },
 
     analyzeLive() {
@@ -527,7 +542,7 @@ export default {
       }
 
       if (payload.type === "status") {
-        this.analysisStatusText = this.formatAnalysisStatus(payload, String(payload.status || "analysis").replaceAll("_", " "));
+        this.analysisStatusText = this.formatAnalysisStatus(payload, this.statusLabel(payload.status));
         return;
       }
 

@@ -1,7 +1,7 @@
-const DEFAULT_DISPLAY_TARGET_DEPTH = 20;
-const DEFAULT_WORKER_TARGET_DEPTH = 26;
+const DEFAULT_DISPLAY_TARGET_DEPTH = 10;
+const DEFAULT_WORKER_TARGET_DEPTH = 70;
 const DEFAULT_DISPLAY_LAG_DEPTH = 2;
-const MAX_ANALYSIS_DEPTH = 50;
+const MAX_ANALYSIS_DEPTH = 70;
 const MAX_DISPLAY_LAG_DEPTH = 10;
 
 function clampInteger(value, fallback, minimum, maximum) {
@@ -36,4 +36,3 @@ export const LIVE_ANALYSIS_DISPLAY_LAG_DEPTH = clampInteger(
   0,
   MAX_DISPLAY_LAG_DEPTH,
 );
-

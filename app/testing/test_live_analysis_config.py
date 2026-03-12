@@ -19,7 +19,7 @@ def test_backend_live_analysis_env_defaults_are_clamped(monkeypatch) -> None:
     reloaded = importlib.reload(config)
 
     assert reloaded.LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH == 19
-    assert reloaded.LIVE_ANALYSIS_WORKER_TARGET_DEPTH == 50
+    assert reloaded.LIVE_ANALYSIS_WORKER_TARGET_DEPTH == 70
     assert reloaded.LIVE_ANALYSIS_DISPLAY_LAG_DEPTH == 0
 
     for name, value in previous.items():

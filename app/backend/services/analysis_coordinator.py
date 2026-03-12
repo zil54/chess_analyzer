@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import chess
@@ -63,10 +63,18 @@ class AnalysisCoordinator:
 
             latest_snapshot = await self.get_snapshot(request.fen)
             latest_depth = self._snapshot_depth(latest_snapshot)
-            if latest_snapshot and latest_depth >= request.worker_target_depth:
+            display_snapshot = latest_snapshot
+            if latest_snapshot and self._snapshot_line_count(latest_snapshot) < DEFAULT_MULTIPV:
+                display_snapshot = await self.get_snapshot(
+                    request.fen,
+                    latest_depth,
+                    prefer_richer_lines=True,
+                ) or latest_snapshot
+            request = self._with_effective_worker_target(request, latest_depth)
+            if latest_snapshot and latest_depth >= MAX_ANALYSIS_DEPTH:
                 await websocket.send_json(
                     self.build_snapshot_event(
-                        latest_snapshot,
+                        display_snapshot,
                         request,
                         source="database",
                         worker_depth=latest_depth,
@@ -77,7 +85,7 @@ class AnalysisCoordinator:
                     self.build_status_event(
                         request,
                         "complete",
-                        "database cache hit",
+                        "database cache hit at max depth",
                         display_depth=latest_depth,
                         worker_depth=latest_depth,
                         worker_running=False,
@@ -90,7 +98,7 @@ class AnalysisCoordinator:
             if latest_snapshot:
                 await websocket.send_json(
                     self.build_snapshot_event(
-                        latest_snapshot,
+                        display_snapshot,
                         request,
                         source="database",
                         worker_depth=latest_depth,
@@ -101,7 +109,7 @@ class AnalysisCoordinator:
             status = "analysis_started" if started else "analysis_running"
             status_message = None
             if latest_snapshot and latest_depth >= request.display_target_depth:
-                status_message = "Serving cached depth while worker deepens"
+                status_message = f"Serving cached depth {latest_depth} while worker deepens to {request.worker_target_depth}"
 
             await websocket.send_json(
                 self.build_status_event(
@@ -174,6 +182,17 @@ class AnalysisCoordinator:
             worker_target_depth=worker_target_depth,
             display_lag_depth=display_lag_depth,
         )
+
+    @staticmethod
+    def _with_effective_worker_target(request: AnalysisRequest, cached_depth: int) -> AnalysisRequest:
+        if cached_depth < request.worker_target_depth or cached_depth >= MAX_ANALYSIS_DEPTH:
+            return request
+
+        extended_target = min(MAX_ANALYSIS_DEPTH, cached_depth + DEFAULT_WORKER_DEPTH_OFFSET)
+        if extended_target <= request.worker_target_depth:
+            return request
+
+        return replace(request, worker_target_depth=extended_target)
 
     @staticmethod
     def _clamp_depth(value: Any, default: int) -> int:
@@ -254,10 +273,15 @@ class AnalysisCoordinator:
             "lines": snapshot.get("lines", []),
         }
 
-    async def get_snapshot(self, fen: str, target_depth: int | None = None) -> dict[str, Any] | None:
+    async def get_snapshot(
+        self,
+        fen: str,
+        target_depth: int | None = None,
+        prefer_richer_lines: bool = False,
+    ) -> dict[str, Any] | None:
         from app.backend.db.db import get_latest_analysis_snapshot
 
-        return await get_latest_analysis_snapshot(fen, target_depth)
+        return await get_latest_analysis_snapshot(fen, target_depth, prefer_richer_lines=prefer_richer_lines)
 
     async def ensure_analysis(self, fen: str, worker_target_depth: int, multipv: int = DEFAULT_MULTIPV) -> bool:
         async with self._jobs_lock:
@@ -575,14 +599,26 @@ class AnalysisCoordinator:
         if display_cap < 1:
             return latest_snapshot
 
-        capped_snapshot = await self.get_snapshot(request.fen, display_cap)
-        return capped_snapshot or latest_snapshot
+        capped_snapshot = await self.get_snapshot(request.fen, display_cap, prefer_richer_lines=True)
+        if not capped_snapshot:
+            return latest_snapshot
+
+        if self._snapshot_line_count(capped_snapshot) < self._snapshot_line_count(latest_snapshot):
+            return latest_snapshot
+
+        return capped_snapshot
 
     @staticmethod
     def _snapshot_depth(snapshot: dict[str, Any] | None) -> int:
         if not snapshot:
             return 0
         return int(snapshot.get("depth", 0) or 0)
+
+    @staticmethod
+    def _snapshot_line_count(snapshot: dict[str, Any] | None) -> int:
+        if not snapshot:
+            return 0
+        return len(snapshot.get("lines", []) or [])
 
     async def _get_job_worker_target_depth(self, fen: str) -> int:
         async with self._jobs_lock:

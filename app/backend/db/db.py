@@ -389,18 +389,47 @@ async def get_analysis_lines(fen: str, depth: int | None = None) -> list[dict]:
         return []
 
 
-async def get_latest_analysis_snapshot(fen: str, target_depth: int | None = None) -> Optional[dict]:
+async def get_latest_analysis_snapshot(
+    fen: str,
+    target_depth: int | None = None,
+    prefer_richer_lines: bool = False,
+) -> Optional[dict]:
     """Return the best available stored snapshot for a FEN.
 
     Preference order:
-    1. Deepest stored `analysis_lines` snapshot up to `target_depth` (if provided)
+    1. Stored `analysis_lines` snapshot (deepest by default, or richest/deepest when `prefer_richer_lines=True`)
     2. Fallback to the top line from `evals`
     """
     eval_row = await get_eval(fen)
 
     async with await get_connection() as conn:
         async with conn.cursor() as cur:
-            if target_depth is not None:
+            if prefer_richer_lines:
+                if target_depth is not None:
+                    await cur.execute(
+                        """
+                        SELECT depth, COUNT(*) AS line_count
+                        FROM public.analysis_lines
+                        WHERE fen = %s AND depth <= %s
+                        GROUP BY depth
+                        ORDER BY line_count DESC, depth DESC
+                        LIMIT 1
+                        """,
+                        (fen, target_depth),
+                    )
+                else:
+                    await cur.execute(
+                        """
+                        SELECT depth, COUNT(*) AS line_count
+                        FROM public.analysis_lines
+                        WHERE fen = %s
+                        GROUP BY depth
+                        ORDER BY line_count DESC, depth DESC
+                        LIMIT 1
+                        """,
+                        (fen,),
+                    )
+            elif target_depth is not None:
                 await cur.execute(
                     """
                     SELECT MAX(depth) AS depth
