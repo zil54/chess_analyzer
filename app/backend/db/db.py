@@ -1,42 +1,31 @@
-import sys
-import asyncio
+import importlib
 import os
-from dotenv import load_dotenv, find_dotenv
 from typing import Optional, Any
+
+from app.backend.config import load_project_env
+from app.backend.runtime import configure_windows_event_loop_policy
 
 # -------------------------------------------------------------------
 # Optional psycopg import for database functionality
 # -------------------------------------------------------------------
 try:
-    import psycopg
-    from psycopg.rows import dict_row
+    psycopg = importlib.import_module("psycopg")
+    dict_row = importlib.import_module("psycopg.rows").dict_row
     PSYCOPG_AVAILABLE = True
 except ImportError:
+    psycopg = None
+    dict_row = None
     PSYCOPG_AVAILABLE = False
 
 # -------------------------------------------------------------------
 # Windows event loop fix
 # -------------------------------------------------------------------
-if sys.platform.startswith("win"):
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+configure_windows_event_loop_policy()
 
 # -------------------------------------------------------------------
 # Load environment variables
 # -------------------------------------------------------------------
-_ROOT_DOTENV_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", ".env"))
-_BACKEND_DOTENV_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
-
-# Load in a few places to handle different working directories (repo root, app/backend, etc.)
-load_dotenv(dotenv_path=_ROOT_DOTENV_PATH, override=False)
-load_dotenv(dotenv_path=_BACKEND_DOTENV_PATH, override=False)
-
-# Also try discovering .env from the current working directory upward.
-try:
-    _FOUND_DOTENV = find_dotenv(usecwd=True)
-    if _FOUND_DOTENV:
-        load_dotenv(dotenv_path=_FOUND_DOTENV, override=False)
-except Exception:
-    pass
+load_project_env()
 
 
 def _build_database_url_from_parts() -> Optional[str]:
@@ -325,24 +314,6 @@ async def store_analysis_lines(
     try:
         async with await get_connection() as conn:
             async with conn.cursor() as cur:
-                # First ensure evals entry exists with this depth
-                await cur.execute(
-                    "SELECT depth FROM public.evals WHERE fen = %s;",
-                    (fen,)
-                )
-                existing = await cur.fetchone()
-                existing_depth = existing['depth'] if existing else 0
-
-                # Only store if depth >= 15 and >= existing
-                if depth < 15:
-                    logger.info(f"Skipping lines storage: depth {depth} < 15")
-                    return
-
-                if existing_depth and depth < existing_depth:
-                    logger.info(f"Skipping lines storage: depth {depth} < existing {existing_depth}")
-                    return
-
-                # Store all lines (up to 3)
                 for line_num, line_data in enumerate(lines[:3], 1):
                     await cur.execute(
                         """
@@ -416,6 +387,89 @@ async def get_analysis_lines(fen: str, depth: int | None = None) -> list[dict]:
         logger = logging.getLogger("chess-analyzer")
         logger.error(f"Error getting analysis lines: {e}")
         return []
+
+
+async def get_latest_analysis_snapshot(fen: str, target_depth: int | None = None) -> Optional[dict]:
+    """Return the best available stored snapshot for a FEN.
+
+    Preference order:
+    1. Deepest stored `analysis_lines` snapshot up to `target_depth` (if provided)
+    2. Fallback to the top line from `evals`
+    """
+    eval_row = await get_eval(fen)
+
+    async with await get_connection() as conn:
+        async with conn.cursor() as cur:
+            if target_depth is not None:
+                await cur.execute(
+                    """
+                    SELECT MAX(depth) AS depth
+                    FROM public.analysis_lines
+                    WHERE fen = %s AND depth <= %s
+                    """,
+                    (fen, target_depth),
+                )
+            else:
+                await cur.execute(
+                    """
+                    SELECT MAX(depth) AS depth
+                    FROM public.analysis_lines
+                    WHERE fen = %s
+                    """,
+                    (fen,),
+                )
+            depth_row = await cur.fetchone()
+            lines_depth = depth_row.get("depth") if depth_row else None
+
+            if lines_depth is not None:
+                await cur.execute(
+                    """
+                    SELECT depth, line_number, best_move, score_cp, score_mate, pv
+                    FROM public.analysis_lines
+                    WHERE fen = %s AND depth = %s
+                    ORDER BY line_number ASC
+                    """,
+                    (fen, lines_depth),
+                )
+                lines = await cur.fetchall()
+            else:
+                lines = []
+
+    if lines:
+        best_line = lines[0]
+        return {
+            "fen": fen,
+            "depth": lines_depth,
+            "best_move": best_line.get("best_move"),
+            "score_cp": best_line.get("score_cp"),
+            "score_mate": best_line.get("score_mate"),
+            "pv": best_line.get("pv"),
+            "lines": list(lines),
+            "created_at": eval_row.get("created_at") if eval_row else None,
+        }
+
+    if not eval_row:
+        return None
+
+    return {
+        "fen": fen,
+        "depth": eval_row.get("depth"),
+        "best_move": eval_row.get("best_move"),
+        "score_cp": eval_row.get("score_cp"),
+        "score_mate": eval_row.get("score_mate"),
+        "pv": eval_row.get("pv"),
+        "lines": [
+            {
+                "depth": eval_row.get("depth"),
+                "line_number": 1,
+                "best_move": eval_row.get("best_move"),
+                "score_cp": eval_row.get("score_cp"),
+                "score_mate": eval_row.get("score_mate"),
+                "pv": eval_row.get("pv"),
+            }
+        ],
+        "created_at": eval_row.get("created_at"),
+    }
 
 
 async def get_eval(fen: str) -> Optional[dict]:

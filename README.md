@@ -149,9 +149,22 @@ Create a `.env` file in the project root:
 # Database configuration (optional)
 DATABASE_URL=postgresql://postgres:<your password>@localhost:5432/chess_analyzer
 
-# Log level
-LOG_LEVEL=INFO
+# Backend live-analysis defaults
+LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH=20
+LIVE_ANALYSIS_WORKER_TARGET_DEPTH=26
+LIVE_ANALYSIS_DISPLAY_LAG_DEPTH=2
 ```
+
+If you run the Vite dev server from `app/frontend`, you can also create `app/frontend/.env`:
+
+```env
+VITE_API_BASE_URL=http://127.0.0.1:8000
+VITE_LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH=20
+VITE_LIVE_ANALYSIS_WORKER_TARGET_DEPTH=26
+VITE_LIVE_ANALYSIS_DISPLAY_LAG_DEPTH=2
+```
+
+Use `.env.example` in the repo root and `app/frontend/.env.example` as templates.
 
 ## Testing
 
@@ -192,6 +205,11 @@ pytest testing/ -k "pgn"
   - Receive: `{"depth": 20, "line1": "e2e4 e7e5...", "score": 25, ...}`
 
 ## Configuration
+
+### Live Analysis Defaults
+- **Backend env**: `LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH`, `LIVE_ANALYSIS_WORKER_TARGET_DEPTH`, `LIVE_ANALYSIS_DISPLAY_LAG_DEPTH`
+- **Frontend env**: `VITE_LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH`, `VITE_LIVE_ANALYSIS_WORKER_TARGET_DEPTH`, `VITE_LIVE_ANALYSIS_DISPLAY_LAG_DEPTH`
+- **Fallback defaults**: display target `20`, worker target `26`, UI lag `2`
 
 ### Depth Settings
 - **Minimum storage depth**: 15

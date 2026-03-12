@@ -1,16 +1,15 @@
 # testing/conftest.py
-import sys
-import asyncio
 import os
 
 import pytest
 import pytest_asyncio
 import psycopg
-from psycopg.rows import dict_row
 from dotenv import load_dotenv
+from psycopg.rows import dict_row
 
-if sys.platform.startswith("win"):
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+from app.backend.runtime import configure_windows_event_loop_policy
+
+configure_windows_event_loop_policy()
 
 _ROOT_DOTENV_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
 _BACKEND_DOTENV_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend", ".env"))

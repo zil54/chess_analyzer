@@ -22,7 +22,7 @@
       </div>
 
       <aside class="mid-right">
-        <LiveAnalysisPanel :lines="currentAnalysisLines" />
+        <LiveAnalysisPanel :lines="currentAnalysisLines" :statusText="analysisStatusText" />
       </aside>
 
       <div class="bottom-left">
@@ -46,10 +46,47 @@
 
 <script>
 import { Chess } from 'chess.js';
+import {
+  LIVE_ANALYSIS_DISPLAY_LAG_DEPTH,
+  LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH,
+  LIVE_ANALYSIS_WORKER_TARGET_DEPTH,
+} from '../config/liveAnalysis';
 import FenControls from './FenControls.vue';
 import PgnPanel from './PgnPanel.vue';
 import BoardDisplay from './BoardDisplay.vue';
 import LiveAnalysisPanel from './LiveAnalysisPanel.vue';
+
+const DEFAULT_BACKEND_PORT = '8000';
+
+function normalizeBaseUrl(url) {
+  return String(url || '').trim().replace(/\/+$/, '');
+}
+
+function getApiBaseUrl() {
+  const configured = normalizeBaseUrl(import.meta.env.VITE_API_BASE_URL);
+  if (configured) return configured;
+
+  if (typeof window === 'undefined') {
+    return `http://127.0.0.1:${DEFAULT_BACKEND_PORT}`;
+  }
+
+  const { origin, protocol, hostname, port } = window.location;
+  if (port === '5173' || port === '4173') {
+    return `${protocol}//${hostname}:${DEFAULT_BACKEND_PORT}`;
+  }
+
+  return normalizeBaseUrl(origin);
+}
+
+function buildApiUrl(path) {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return `${getApiBaseUrl()}${normalizedPath}`;
+}
+
+function buildWebSocketUrl(path) {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return buildApiUrl(normalizedPath).replace(/^http/i, 'ws');
+}
 
 export default {
   name: 'Analyzer',
@@ -70,11 +107,12 @@ export default {
       // each entry: { depthLabel: string, lines: [{ label: string, text: string }] }
       currentAnalysisLines: [],
       currentAnalysisDepth: 1,
+      analysisStatusText: "",
       boardFlipped: false,
       waitingForDepthOne: false,
 
       // UI smoothing: keep a depth block steady for a short time before updating
-      analysisHoldMs: 12000,
+      analysisHoldMs: 1200,
       pendingAnalysisLines: null,
       pendingDepth: null,
       pendingTimer: null,
@@ -89,6 +127,10 @@ export default {
     // Set default starting position
     this.fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
     this.renderBoard();
+  },
+
+  beforeUnmount() {
+    this.stopLiveAnalysis();
   },
 
   computed: {
@@ -179,8 +221,33 @@ export default {
       }
     },
 
+    resetAnalysisState(statusText = "") {
+      this.pvLines = [];
+      this.currentAnalysisLines = [];
+      this.currentAnalysisDepth = 0;
+      this.analysisStatusText = statusText;
+      this.waitingForDepthOne = false;
+      this.lastRenderedAt = 0;
+
+      if (this.pendingTimer) {
+        clearTimeout(this.pendingTimer);
+        this.pendingTimer = null;
+      }
+
+      this.pendingAnalysisLines = null;
+      this.pendingDepth = null;
+    },
+
+    apiUrl(path) {
+      return buildApiUrl(path);
+    },
+
+    wsUrl(path) {
+      return buildWebSocketUrl(path);
+    },
+
     async renderBoard() {
-      const res = await fetch("http://localhost:8000/svg", {
+      const res = await fetch(this.apiUrl("/svg"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ fen: this.fen, flip: this.boardFlipped })
@@ -188,29 +255,57 @@ export default {
       this.svgBoard = await res.text();
     },
 
+    formatAnalysisStatus(payload, sourceLabel = "Analysis") {
+      const displayDepth = Number(payload?.depth ?? payload?.display_depth ?? 0) || 0;
+      const displayTarget = Number(payload?.display_target_depth ?? payload?.target_depth ?? LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH) || LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH;
+      const workerDepth = Number(payload?.worker_depth ?? displayDepth) || displayDepth;
+      const workerTarget = Number(payload?.worker_target_depth ?? displayTarget) || displayTarget;
+
+      if (payload?.type === "status" && payload?.message) {
+        return payload.message;
+      }
+
+      if (!displayDepth && !workerDepth) {
+        return sourceLabel;
+      }
+
+      return `${sourceLabel}: showing depth ${displayDepth}/${displayTarget} · worker ${workerDepth}/${workerTarget}`;
+    },
+
     analyzeLive() {
-      // reset UI buffers
-      this.pvLines = [];
-      this.currentAnalysisLines = [];
-      this.currentAnalysisDepth = 1;
-      this.waitingForDepthOne = false;
+      if (!this.isFenValid) {
+        this.resetAnalysisState("Enter a valid FEN before starting analysis");
+        return;
+      }
+
+      this.resetAnalysisState("Connecting to analysis service...");
       if (this.socket) this.socket.close();
-      this.socket = new WebSocket("ws://localhost:8000/ws/analyze");
+
+      const socketUrl = this.wsUrl("/ws/analyze");
+      this.socket = new WebSocket(socketUrl);
 
       this.socket.onopen = () => {
-        this.socket.send(this.fen);
+        this.analysisStatusText = "Live analysis started";
+        this.socket.send(JSON.stringify({
+          fen: this.fen,
+          depth: LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH,
+          display_target_depth: LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH,
+          worker_target_depth: LIVE_ANALYSIS_WORKER_TARGET_DEPTH,
+          display_lag_depth: LIVE_ANALYSIS_DISPLAY_LAG_DEPTH,
+        }));
       };
       this.socket.onmessage = (event) => {
-        const line = event.data;
-        if (!line || !line.includes(" pv ")) return;
-        this.pvLines.push(line);
-        this.updateAnalysisDisplay();
+        this.handleAnalysisMessage(event.data);
       };
       this.socket.onerror = (err) => {
+        this.analysisStatusText = "Analysis connection error";
         console.error("WS Error", err);
       };
-      this.socket.onclose = () => {
-        // optional: log close
+      this.socket.onclose = (event) => {
+        if (!event.wasClean && !this.currentAnalysisLines.length) {
+          this.analysisStatusText = "Analysis connection closed before data arrived";
+        }
+        this.socket = null;
       };
     },
 
@@ -219,13 +314,7 @@ export default {
         this.socket.close();
         this.socket = null;
       }
-      // Clear any pending UI update timer
-      if (this.pendingTimer) {
-        clearTimeout(this.pendingTimer);
-        this.pendingTimer = null;
-      }
-      this.pendingAnalysisLines = null;
-      this.pendingDepth = null;
+      this.resetAnalysisState("Analysis stopped");
     },
 
     stringifyError(error, fallback = "Unknown error") {
@@ -279,9 +368,9 @@ export default {
         formData.append("file", file);
 
         try {
-          console.log("Uploading PGN to: http://localhost:8000/games");
+          console.log(`Uploading PGN to: ${this.apiUrl("/games")}`);
 
-          const createRes = await fetch("http://localhost:8000/games", {
+          const createRes = await fetch(this.apiUrl("/games"), {
             method: "POST",
             body: formData
           });
@@ -309,7 +398,7 @@ export default {
               positions: created.positions
             };
           } else if (this.gameId != null) {
-            const movesRes = await fetch(`http://localhost:8000/games/${this.gameId}/moves`);
+            const movesRes = await fetch(this.apiUrl(`/games/${this.gameId}/moves`));
             console.log("GET /games/{id}/moves response status:", movesRes.status);
 
             if (!movesRes.ok) {
@@ -340,7 +429,7 @@ export default {
           if (this.gameId != null) {
             console.log("Starting batch analysis of all positions...");
             try {
-              const analyzeRes = await fetch(`http://localhost:8000/games/${this.gameId}/analyze`, {
+              const analyzeRes = await fetch(this.apiUrl(`/games/${this.gameId}/analyze`), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -375,9 +464,7 @@ export default {
       // Stop any ongoing analysis
       this.stopLiveAnalysis();
       // Clear previous analysis
-      this.pvLines = [];
-      this.currentAnalysisLines = [];
-      this.currentAnalysisDepth = 0;
+      this.resetAnalysisState();
 
       const position = this.pgnData.positions[moveIndex];
       this.fen = position.fen;
@@ -412,6 +499,121 @@ export default {
       this.boardFlipped = !this.boardFlipped;
       if (this.fen) {
         this.renderBoard();
+      }
+    },
+
+    handleAnalysisMessage(message) {
+      if (!message) return;
+
+      let payload = null;
+      try {
+        payload = JSON.parse(message);
+      } catch (_) {
+        payload = null;
+      }
+
+      if (!payload) {
+        if (typeof message === "string" && message.includes(" pv ")) {
+          this.pvLines.push(message);
+          this.updateAnalysisDisplay();
+        }
+        return;
+      }
+
+      if (payload.type === "error") {
+        this.analysisStatusText = payload.message || "Analysis failed";
+        console.error("Analysis error:", payload.message || payload);
+        return;
+      }
+
+      if (payload.type === "status") {
+        this.analysisStatusText = this.formatAnalysisStatus(payload, String(payload.status || "analysis").replaceAll("_", " "));
+        return;
+      }
+
+      if (payload.type === "snapshot") {
+        const sourceLabel = payload.source === "database" ? "DB" : "Engine";
+        this.analysisStatusText = this.formatAnalysisStatus(payload, sourceLabel);
+        this.renderSnapshot(payload);
+      }
+    },
+
+    formatEvaluationValue(scoreCp, scoreMate) {
+      const fenParts = (this.fen || "").trim().split(/\s+/);
+      const sideToMove = fenParts.length >= 2 ? fenParts[1] : 'w';
+      const sign = sideToMove === 'b' ? -1 : 1;
+
+      if (scoreMate !== null && scoreMate !== undefined && scoreMate !== "") {
+        return `#${Number(scoreMate) * sign}`;
+      }
+      if (scoreCp !== null && scoreCp !== undefined && scoreCp !== "") {
+        return (Number(scoreCp) * sign / 100).toFixed(2);
+      }
+      return "--";
+    },
+
+    renderSnapshot(snapshot) {
+      const depth = parseInt(snapshot.depth || 0, 10);
+      const lines = Array.isArray(snapshot.lines) ? snapshot.lines : [];
+      if (!depth || lines.length === 0) return;
+
+      const depthLines = lines.map((line, idx) => {
+        const pvUci = line.pv || "";
+        const pvAlgebraic = pvUci ? this.convertToAlgebraic(pvUci, this.fen) : "";
+        const evalValue = this.formatEvaluationValue(line.score_cp, line.score_mate);
+        return {
+          label: `Line ${line.line_number || idx + 1}:`,
+          text: `${evalValue} ${pvAlgebraic}`.trim()
+        };
+      });
+
+      this.applyAnalysisDisplay(
+        [
+          {
+            depthLabel: `[Depth ${depth}]`,
+            lines: depthLines
+          }
+        ],
+        depth
+      );
+    },
+
+    applyAnalysisDisplay(newDisplay, latestDepth) {
+      if (latestDepth === this.currentAnalysisDepth) {
+        this.currentAnalysisLines = newDisplay;
+        this.lastRenderedAt = Date.now();
+        return;
+      }
+
+      const now = Date.now();
+      const elapsed = now - (this.lastRenderedAt || 0);
+      const remainingHold = Math.max(0, this.analysisHoldMs - elapsed);
+
+      this.pendingAnalysisLines = newDisplay;
+      this.pendingDepth = latestDepth;
+
+      if (this.pendingTimer) {
+        clearTimeout(this.pendingTimer);
+        this.pendingTimer = null;
+      }
+
+      if (remainingHold === 0) {
+        this.currentAnalysisLines = this.pendingAnalysisLines;
+        this.currentAnalysisDepth = this.pendingDepth;
+        this.pendingAnalysisLines = null;
+        this.pendingDepth = null;
+        this.lastRenderedAt = Date.now();
+      } else {
+        this.pendingTimer = setTimeout(() => {
+          this.currentAnalysisLines = this.pendingAnalysisLines || this.currentAnalysisLines;
+          if (this.pendingDepth != null) {
+            this.currentAnalysisDepth = this.pendingDepth;
+          }
+          this.pendingAnalysisLines = null;
+          this.pendingDepth = null;
+          this.pendingTimer = null;
+          this.lastRenderedAt = Date.now();
+        }, remainingHold);
       }
     },
 
@@ -468,52 +670,15 @@ export default {
         text: `${line.eval} ${line.pv}`
       }));
 
-      const newDisplay = [
-        {
-          depthLabel: `[Depth ${latestDepth}]`,
-          lines: depthLines
-        }
-      ];
-
-      // If depth hasn't changed, update immediately (same-depth refinements are useful).
-      if (latestDepth === this.currentAnalysisDepth) {
-        this.currentAnalysisLines = newDisplay;
-        this.lastRenderedAt = Date.now();
-        return;
-      }
-
-      // Depth advanced: hold the currently rendered block for a bit to reduce flicker.
-      const now = Date.now();
-      const elapsed = now - (this.lastRenderedAt || 0);
-      const remainingHold = Math.max(0, this.analysisHoldMs - elapsed);
-
-      // Always keep the latest depth as pending.
-      this.pendingAnalysisLines = newDisplay;
-      this.pendingDepth = latestDepth;
-
-      if (this.pendingTimer) {
-        clearTimeout(this.pendingTimer);
-        this.pendingTimer = null;
-      }
-
-      if (remainingHold === 0) {
-        this.currentAnalysisLines = this.pendingAnalysisLines;
-        this.currentAnalysisDepth = this.pendingDepth;
-        this.pendingAnalysisLines = null;
-        this.pendingDepth = null;
-        this.lastRenderedAt = Date.now();
-      } else {
-        this.pendingTimer = setTimeout(() => {
-          this.currentAnalysisLines = this.pendingAnalysisLines || this.currentAnalysisLines;
-          if (this.pendingDepth != null) {
-            this.currentAnalysisDepth = this.pendingDepth;
+      this.applyAnalysisDisplay(
+        [
+          {
+            depthLabel: `[Depth ${latestDepth}]`,
+            lines: depthLines
           }
-          this.pendingAnalysisLines = null;
-          this.pendingDepth = null;
-          this.pendingTimer = null;
-          this.lastRenderedAt = Date.now();
-        }, remainingHold);
-      }
+        ],
+        latestDepth
+      );
     }
   }
 };

@@ -25,6 +25,19 @@ See [Vite Configuration Reference](https://vite.dev/config/).
 npm install
 ```
 
+### Frontend Environment Variables
+
+Create `app/frontend/.env` if you want to override defaults locally:
+
+```sh
+VITE_API_BASE_URL=http://127.0.0.1:8000
+VITE_LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH=20
+VITE_LIVE_ANALYSIS_WORKER_TARGET_DEPTH=26
+VITE_LIVE_ANALYSIS_DISPLAY_LAG_DEPTH=2
+```
+
+You can copy `app/frontend/.env.example` as a starting point.
+
 ### Compile and Hot-Reload for Development
 
 ```sh

@@ -1,6 +1,7 @@
 <template>
-  <div class="live-output" v-if="lines && lines.length > 0">
-    <div class="live-output-scroll">
+  <div class="live-output" v-if="hasContent">
+    <div class="analysis-status" v-if="statusText">{{ statusText }}</div>
+    <div class="live-output-scroll" v-if="lines && lines.length > 0">
       <div
         v-for="(depthBlock, depthIdx) in lines"
         :key="depthIdx"
@@ -29,7 +30,13 @@
 export default {
   name: 'LiveAnalysisPanel',
   props: {
-    lines: { type: Array, required: true }
+    lines: { type: Array, required: true },
+    statusText: { type: String, default: '' }
+  },
+  computed: {
+    hasContent() {
+      return (this.lines && this.lines.length > 0) || !!this.statusText;
+    }
   }
 };
 </script>
@@ -41,6 +48,12 @@ export default {
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
+}
+
+.analysis-status {
+  margin-bottom: 10px;
+  font-weight: 600;
+  color: #2c3e50;
 }
 
 .pv-line-label {
