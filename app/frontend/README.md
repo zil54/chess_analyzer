@@ -43,11 +43,16 @@ Variable meanings:
 - `VITE_LIVE_ANALYSIS_WORKER_TARGET_DEPTH` - depth the backend worker is allowed to continue to before stopping
 - `VITE_LIVE_ANALYSIS_DISPLAY_LAG_DEPTH` - how far behind the worker the displayed snapshot is allowed to be
 
+Backend-controlled live-analysis setting:
+
+- `LIVE_ANALYSIS_CACHE_UNLOCK_DEPTH_DELTA` - how much deeper the worker must go before cached DB output is allowed to advance again in the UI
+
 Current default behavior in the UI:
 
 - the panel starts showing analysis as soon as data is available
 - with DB disabled, it shows direct engine output from low depths
 - with DB enabled, it may show a cached snapshot first and then continue deepening live
+- when cached output is pinned, the backend sends an unlock depth and the UI shows `App is analyzing further.` until the worker reaches it
 - completed deepened results can display text like:
   - `Analysis complete · showing depth 26 (requested 10) · worker 26/26`
 

@@ -110,17 +110,19 @@ npm run dev
 
 ### Live Analysis Behavior
 
-The live-analysis flow uses three separate concepts:
+The live-analysis flow uses four separate concepts:
 
 - **Display target depth** - when the UI has reached a useful minimum depth
 - **Worker target depth** - when the background analysis job is allowed to stop
 - **Display lag depth** - how far behind the worker the displayed snapshot is allowed to be
+- **Cache unlock depth delta** - how much deeper the worker must go before cached output is allowed to advance again
 
 Current default values:
 
 - **Display target**: `10`
 - **Worker target**: `70`
 - **Display lag**: `2`
+- **Cache unlock delta**: `3`
 
 #### Without Database
 
@@ -150,6 +152,35 @@ When multiple cached depths exist:
 - for display, it prefers a **richer multi-line snapshot** over a slightly deeper snapshot that only has line 1
 - this keeps the UI from regressing from 3 lines to 1 line just because a deeper partial depth was stored first
 
+#### Cached Display Lock While Deepening Further
+
+When a cached snapshot is shown from the database, the UI now follows a two-phase rule:
+
+1. **Show the cached snapshot immediately**
+2. **Keep that cached depth on screen until the worker reaches cached depth + cache unlock delta**
+3. Once the worker has reached that threshold, the UI starts advancing again using the normal display-lag rule
+
+Example with the default cache unlock delta of `3`:
+
+- cached depth shown immediately: `18`
+- worker continues in background: `19`, `20`, `21`, ...
+- UI stays on depth `18` while the worker is below `21`
+- when the worker reaches `21`, the UI is allowed to move forward again
+- with display lag `2`, the next visible depth would typically be `19`
+
+This avoids a jittery transition where cached data disappears too quickly, while still letting the database deepen in the background.
+
+#### UI Feedback While Cached Output Is Held
+
+While the UI is still pinned to the cached depth and the worker is deepening further:
+
+- the analysis lines stay visible
+- the live-analysis panel shows a spinner
+- the panel displays the message **`App is analyzing further.`**
+- the status line still shows current display depth and worker depth progress
+
+This makes it clear that the application is still working even though the displayed depth has not advanced yet.
+
 #### Cached Positions Can Deepen Further
 
 If a cached position already exceeds the requested worker target, the coordinator may still deepen further instead of stopping immediately.
@@ -169,7 +200,7 @@ The only time cached analysis ends immediately is when the cached position is al
 Representative status text now looks like:
 
 - `Live analysis · showing depth 8/10 · worker 10/70`
-- `Serving cached depth 40 while worker deepens to 46 · showing depth 40 (requested 10) · worker 40/46`
+- `Serving cached depth 40 while app analyzes further to worker depth 46 · showing depth 40 (requested 10) · worker 40/46`
 - `Analysis complete · showing depth 26 (requested 10) · worker 26/26`
 
 ### Uploading PGN Files
@@ -219,6 +250,7 @@ DATABASE_URL=postgresql://postgres:<your password>@localhost:5432/chess_analyzer
 LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH=10
 LIVE_ANALYSIS_WORKER_TARGET_DEPTH=70
 LIVE_ANALYSIS_DISPLAY_LAG_DEPTH=2
+LIVE_ANALYSIS_CACHE_UNLOCK_DEPTH_DELTA=3
 ```
 
 If you run the Vite dev server from `app/frontend`, you can also create `app/frontend/.env`:
@@ -229,6 +261,8 @@ VITE_LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH=10
 VITE_LIVE_ANALYSIS_WORKER_TARGET_DEPTH=70
 VITE_LIVE_ANALYSIS_DISPLAY_LAG_DEPTH=2
 ```
+
+`LIVE_ANALYSIS_CACHE_UNLOCK_DEPTH_DELTA` is backend-only because the server computes `display_unlock_depth` and sends it to the UI.
 
 Use `.env.example` in the repo root and `app/frontend/.env.example` as templates.
 
@@ -288,23 +322,14 @@ pytest testing/ -k "pgn"
 ## Configuration
 
 ### Live Analysis Defaults
-- **Backend env**: `LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH`, `LIVE_ANALYSIS_WORKER_TARGET_DEPTH`, `LIVE_ANALYSIS_DISPLAY_LAG_DEPTH`
+- **Backend env**: `LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH`, `LIVE_ANALYSIS_WORKER_TARGET_DEPTH`, `LIVE_ANALYSIS_DISPLAY_LAG_DEPTH`, `LIVE_ANALYSIS_CACHE_UNLOCK_DEPTH_DELTA`
 - **Frontend env**: `VITE_LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH`, `VITE_LIVE_ANALYSIS_WORKER_TARGET_DEPTH`, `VITE_LIVE_ANALYSIS_DISPLAY_LAG_DEPTH`
-- **Fallback defaults**: display target `10`, worker target `70`, UI lag `2`
+- **Fallback defaults**: display target `10`, worker target `70`, UI lag `2`, cache unlock delta `3`
 - **Maximum depth clamp**: `70`
 
 ### Depth Settings
 - **Display target depth**: default `10`
 - **Worker target depth**: default `70`
 - **Display lag depth**: default `2`
+- **Cache unlock depth delta**: default `3`, clamped to `0..10`
 - **Top lines shown**: up to 3 principal variations
-
-### Persistence Notes
-- In DB-backed live analysis, cached snapshots can be shown immediately and then deepened further
-- The `evals` table stores the latest best line for a FEN
-- The `analysis_lines` table stores per-depth principal-variation snapshots used by the live-analysis panel
-- No-DB mode performs live analysis only; it does not persist cached snapshots
-
-### Evaluation Update Strategy
-- **No DB**: direct live engine stream only
-- **With DB**: cached snapshot first when available, then deeper background analysis with DB updates

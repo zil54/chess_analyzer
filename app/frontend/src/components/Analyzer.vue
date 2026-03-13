@@ -22,7 +22,12 @@
       </div>
 
       <aside class="mid-right">
-        <LiveAnalysisPanel :lines="currentAnalysisLines" :statusText="analysisStatusText" />
+        <LiveAnalysisPanel
+          :lines="currentAnalysisLines"
+          :statusText="analysisStatusText"
+          :isAnalyzingFurther="analysisFurtherActive"
+          :activityText="analysisFurtherText"
+        />
       </aside>
 
       <div class="bottom-left">
@@ -108,6 +113,8 @@ export default {
       currentAnalysisLines: [],
       currentAnalysisDepth: 1,
       analysisStatusText: "",
+      analysisFurtherActive: false,
+      analysisFurtherText: "",
       boardFlipped: false,
       waitingForDepthOne: false,
 
@@ -226,6 +233,8 @@ export default {
       this.currentAnalysisLines = [];
       this.currentAnalysisDepth = 0;
       this.analysisStatusText = statusText;
+      this.analysisFurtherActive = false;
+      this.analysisFurtherText = "";
       this.waitingForDepthOne = false;
       this.lastRenderedAt = 0;
 
@@ -277,6 +286,26 @@ export default {
       return `${sourceLabel} · ${progressText}`;
     },
 
+    syncAnalysisActivity(payload) {
+      const cachedDepth = Number(payload?.cached_depth ?? payload?.display_lock_depth ?? 0) || 0;
+      const workerDepth = Number(payload?.worker_depth ?? payload?.depth ?? 0) || 0;
+      const unlockDepth = Number(payload?.display_unlock_depth ?? 0) || 0;
+      const workerRunning = Boolean(payload?.worker_running);
+      const displayLocked = Boolean(payload?.display_locked);
+      const isAnalyzingFurther = cachedDepth > 0 && workerRunning && displayLocked;
+
+      this.analysisFurtherActive = isAnalyzingFurther;
+      if (!isAnalyzingFurther) {
+        this.analysisFurtherText = "";
+        return;
+      }
+
+      const waitingText = unlockDepth > workerDepth
+        ? ` Waiting for worker depth ${unlockDepth}.`
+        : "";
+      this.analysisFurtherText = `App is analyzing further.${waitingText}`;
+    },
+
     statusLabel(status) {
       const labels = {
         analysis_started: "Live analysis",
@@ -314,9 +343,13 @@ export default {
       };
       this.socket.onerror = (err) => {
         this.analysisStatusText = "Analysis connection error";
+        this.analysisFurtherActive = false;
+        this.analysisFurtherText = "";
         console.error("WS Error", err);
       };
       this.socket.onclose = (event) => {
+        this.analysisFurtherActive = false;
+        this.analysisFurtherText = "";
         if (!event.wasClean && !this.currentAnalysisLines.length) {
           this.analysisStatusText = "Analysis connection closed before data arrived";
         }
@@ -536,17 +569,21 @@ export default {
       }
 
       if (payload.type === "error") {
+        this.analysisFurtherActive = false;
+        this.analysisFurtherText = "";
         this.analysisStatusText = payload.message || "Analysis failed";
         console.error("Analysis error:", payload.message || payload);
         return;
       }
 
       if (payload.type === "status") {
+        this.syncAnalysisActivity(payload);
         this.analysisStatusText = this.formatAnalysisStatus(payload, this.statusLabel(payload.status));
         return;
       }
 
       if (payload.type === "snapshot") {
+        this.syncAnalysisActivity(payload);
         const sourceLabel = payload.source === "database" ? "DB" : "Engine";
         this.analysisStatusText = this.formatAnalysisStatus(payload, sourceLabel);
         this.renderSnapshot(payload);

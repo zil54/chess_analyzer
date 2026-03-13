@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 
 import pytest
 
@@ -57,6 +58,57 @@ def test_parse_request_payload_supports_plain_text_and_json() -> None:
     assert json_request.display_target_depth == 18
     assert json_request.worker_target_depth == 24
     assert json_request.display_lag_depth == 3
+
+
+def test_cache_unlock_depth_delta_is_configurable_via_backend_env(monkeypatch) -> None:
+    monkeypatch.setenv("LIVE_ANALYSIS_CACHE_UNLOCK_DEPTH_DELTA", "5")
+
+    import app.backend.config as config
+    import app.backend.services.analysis_coordinator as analysis_coordinator_module
+
+    importlib.reload(config)
+    reloaded = importlib.reload(analysis_coordinator_module)
+
+    try:
+        request = reloaded.AnalysisCoordinator.parse_request_payload(
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+        )
+        event = reloaded.AnalysisCoordinator.build_snapshot_event(
+            _snapshot(18),
+            request,
+            source="database",
+            worker_depth=20,
+            worker_running=True,
+            cached_depth=18,
+        )
+
+        assert reloaded.DEFAULT_CACHE_UNLOCK_DEPTH_DELTA == 5
+        assert event["display_unlock_depth"] == 23
+        assert event["display_locked"] is True
+    finally:
+        monkeypatch.delenv("LIVE_ANALYSIS_CACHE_UNLOCK_DEPTH_DELTA", raising=False)
+        importlib.reload(config)
+        importlib.reload(analysis_coordinator_module)
+
+
+def test_build_snapshot_event_without_cached_depth_is_not_locked() -> None:
+    fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    request = AnalysisCoordinator.parse_request_payload(fen)
+
+    event = AnalysisCoordinator.build_snapshot_event(
+        _snapshot(4),
+        request,
+        source="engine",
+        worker_depth=6,
+        worker_running=True,
+        cached_depth=None,
+    )
+
+    assert event["source"] == "engine"
+    assert event["cached_depth"] is None
+    assert event["display_unlock_depth"] is None
+    assert event["display_locked"] is False
+    assert event["background_analysis"] is False
 
 
 @pytest.mark.asyncio
@@ -118,11 +170,61 @@ async def test_handle_websocket_extends_cached_snapshot_beyond_requested_worker_
     assert websocket.messages[0]["depth"] == 20
     assert websocket.messages[0]["worker_target_depth"] == 26
     assert websocket.messages[0]["worker_running"] is True
+    assert websocket.messages[0]["cached_depth"] == 20
+    assert websocket.messages[0]["display_unlock_depth"] == 23
+    assert websocket.messages[0]["display_locked"] is True
     assert websocket.messages[1]["status"] == "analysis_started"
-    assert "worker deepens to 26" in websocket.messages[1]["message"]
+    assert "app analyzes further" in websocket.messages[1]["message"]
+    assert websocket.messages[1]["display_locked"] is True
     assert websocket.messages[-1]["status"] == "complete"
     assert websocket.messages[-1]["worker_depth"] == 20
     assert websocket.messages[-1]["worker_complete"] is False
+    assert websocket.messages[-1]["display_locked"] is False
+
+
+@pytest.mark.asyncio
+async def test_handle_websocket_holds_cached_snapshot_until_worker_reaches_cached_depth_plus_three(monkeypatch) -> None:
+    coordinator = AnalysisCoordinator(poll_interval=0)
+    websocket = FakeWebSocket(
+        '{"fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", "depth": 10, "worker_target_depth": 30, "display_lag_depth": 2}'
+    )
+    latest_depths = iter([18, 19, 20, 21, 22])
+    running_states = iter([True, True, True, False])
+
+    monkeypatch.setattr(coordinator, "_db_enabled", lambda: True)
+
+    async def fake_get_snapshot(fen: str, target_depth: int | None = None, prefer_richer_lines: bool = False):
+        if target_depth is None:
+            try:
+                depth = next(latest_depths)
+            except StopIteration:
+                depth = 22
+            return _snapshot(depth)
+
+        return _snapshot(min(target_depth, 22))
+
+    async def fake_ensure_analysis(fen: str, worker_target_depth: int, multipv: int = 3) -> bool:
+        return True
+
+    async def fake_job_is_running(fen: str) -> bool:
+        try:
+            return next(running_states)
+        except StopIteration:
+            return False
+
+    monkeypatch.setattr(coordinator, "get_snapshot", fake_get_snapshot)
+    monkeypatch.setattr(coordinator, "ensure_analysis", fake_ensure_analysis)
+    monkeypatch.setattr(coordinator, "_job_is_running", fake_job_is_running)
+
+    await coordinator.handle_websocket(websocket)
+
+    snapshot_messages = [message for message in websocket.messages if message["type"] == "snapshot"]
+    assert [message["depth"] for message in snapshot_messages] == [18, 19, 22]
+    assert snapshot_messages[0]["display_locked"] is True
+    assert snapshot_messages[0]["display_unlock_depth"] == 21
+    assert snapshot_messages[1]["worker_depth"] == 21
+    assert snapshot_messages[1]["display_locked"] is False
+    assert snapshot_messages[2]["worker_running"] is False
 
 
 @pytest.mark.asyncio
@@ -149,8 +251,10 @@ async def test_handle_websocket_returns_terminal_cached_snapshot_at_max_depth(mo
     assert [message["type"] for message in websocket.messages] == ["snapshot", "status"]
     assert websocket.messages[0]["depth"] == 70
     assert websocket.messages[0]["worker_running"] is False
+    assert websocket.messages[0]["display_locked"] is False
     assert websocket.messages[1]["status"] == "complete"
     assert websocket.messages[1]["worker_complete"] is True
+    assert websocket.messages[1]["display_locked"] is False
 
 
 @pytest.mark.asyncio
@@ -246,10 +350,14 @@ async def test_handle_websocket_starts_worker_and_streams_lagged_db_snapshots(mo
     assert started == [("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 18)]
     assert [message["type"] for message in websocket.messages] == ["snapshot", "status", "snapshot", "snapshot", "status"]
     assert websocket.messages[0]["depth"] == 12
+    assert websocket.messages[0]["display_locked"] is True
+    assert websocket.messages[0]["display_unlock_depth"] == 15
     assert websocket.messages[1]["status"] == "analysis_started"
+    assert websocket.messages[1]["display_locked"] is True
     assert websocket.messages[2]["depth"] == 16
     assert websocket.messages[2]["worker_depth"] == 18
+    assert websocket.messages[2]["display_locked"] is False
     assert websocket.messages[3]["depth"] == 18
     assert websocket.messages[3]["worker_running"] is False
     assert websocket.messages[-1]["status"] == "complete"
-
+    assert websocket.messages[-1]["display_locked"] is False

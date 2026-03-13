@@ -9,6 +9,7 @@ import chess
 from fastapi import WebSocket, WebSocketDisconnect
 
 from app.backend.config import (
+    LIVE_ANALYSIS_CACHE_UNLOCK_DEPTH_DELTA,
     LIVE_ANALYSIS_DISPLAY_LAG_DEPTH,
     LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH,
     LIVE_ANALYSIS_WORKER_TARGET_DEPTH,
@@ -25,6 +26,7 @@ DEFAULT_WORKER_DEPTH_OFFSET = 6
 DEFAULT_WORKER_TARGET_DEPTH = max(LIVE_ANALYSIS_WORKER_TARGET_DEPTH, DEFAULT_DISPLAY_TARGET_DEPTH)
 DEFAULT_DISPLAY_LAG_DEPTH = LIVE_ANALYSIS_DISPLAY_LAG_DEPTH
 DEFAULT_MULTIPV = 3
+DEFAULT_CACHE_UNLOCK_DEPTH_DELTA = LIVE_ANALYSIS_CACHE_UNLOCK_DEPTH_DELTA
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,7 @@ class AnalysisCoordinator:
                     latest_depth,
                     prefer_richer_lines=True,
                 ) or latest_snapshot
+            cached_display_depth = self._snapshot_depth(display_snapshot)
             request = self._with_effective_worker_target(request, latest_depth)
             if latest_snapshot and latest_depth >= MAX_ANALYSIS_DEPTH:
                 await websocket.send_json(
@@ -79,6 +82,7 @@ class AnalysisCoordinator:
                         source="database",
                         worker_depth=latest_depth,
                         worker_running=False,
+                        cached_depth=cached_display_depth,
                     )
                 )
                 await websocket.send_json(
@@ -86,9 +90,10 @@ class AnalysisCoordinator:
                         request,
                         "complete",
                         "database cache hit at max depth",
-                        display_depth=latest_depth,
+                        display_depth=cached_display_depth,
                         worker_depth=latest_depth,
                         worker_running=False,
+                        cached_depth=cached_display_depth,
                     )
                 )
                 return
@@ -103,25 +108,29 @@ class AnalysisCoordinator:
                         source="database",
                         worker_depth=latest_depth,
                         worker_running=True,
+                        cached_depth=cached_display_depth,
                     )
                 )
 
             status = "analysis_started" if started else "analysis_running"
             status_message = None
-            if latest_snapshot and latest_depth >= request.display_target_depth:
-                status_message = f"Serving cached depth {latest_depth} while worker deepens to {request.worker_target_depth}"
+            if latest_snapshot:
+                status_message = (
+                    f"Serving cached depth {cached_display_depth} while app analyzes further to worker depth {request.worker_target_depth}"
+                )
 
             await websocket.send_json(
                 self.build_status_event(
                     request,
                     status,
                     status_message,
-                    display_depth=latest_depth if latest_snapshot else None,
+                    display_depth=cached_display_depth if latest_snapshot else None,
                     worker_depth=latest_depth if latest_snapshot else None,
                     worker_running=True,
+                    cached_depth=cached_display_depth if latest_snapshot else None,
                 )
             )
-            await self._stream_database_updates(websocket, request, latest_snapshot)
+            await self._stream_database_updates(websocket, request, display_snapshot, cached_display_depth)
         except WebSocketDisconnect:
             logger.info("WebSocket disconnected during analysis stream")
         except ValueError as exc:
@@ -217,6 +226,7 @@ class AnalysisCoordinator:
         display_depth: int | None = None,
         worker_depth: int | None = None,
         worker_running: bool | None = None,
+        cached_depth: int | None = None,
     ) -> dict[str, Any]:
         event = {
             "type": "status",
@@ -234,10 +244,23 @@ class AnalysisCoordinator:
             event["display_complete"] = int(display_depth) >= request.display_target_depth
         if worker_depth is not None:
             event["worker_depth"] = int(worker_depth)
+        unlock_depth = AnalysisCoordinator._display_unlock_depth(cached_depth)
+        event["cached_depth"] = int(cached_depth) if cached_depth else None
+        event["display_lock_depth"] = int(cached_depth) if cached_depth else None
+        event["display_unlock_depth"] = unlock_depth
         if worker_running is not None:
             event["worker_running"] = worker_running
             if worker_depth is not None:
                 event["worker_complete"] = int(worker_depth) >= request.worker_target_depth and not worker_running
+        event["display_locked"] = bool(
+            cached_depth
+            and worker_running
+            and worker_depth is not None
+            and unlock_depth is not None
+            and int(worker_depth) < unlock_depth
+            and int(display_depth or 0) <= int(cached_depth)
+        )
+        event["background_analysis"] = event["display_locked"]
         return event
 
     @staticmethod
@@ -248,10 +271,18 @@ class AnalysisCoordinator:
         *,
         worker_depth: int | None = None,
         worker_running: bool = False,
+        cached_depth: int | None = None,
     ) -> dict[str, Any]:
         depth = AnalysisCoordinator._snapshot_depth(snapshot)
         latest_worker_depth = max(depth, int(worker_depth or 0))
         display_complete = depth >= request.display_target_depth
+        unlock_depth = AnalysisCoordinator._display_unlock_depth(cached_depth)
+        display_locked = bool(
+            cached_depth
+            and worker_running
+            and latest_worker_depth < (unlock_depth or 0)
+            and depth <= int(cached_depth)
+        )
         return {
             "type": "snapshot",
             "fen": snapshot.get("fen"),
@@ -266,6 +297,11 @@ class AnalysisCoordinator:
             "worker_running": worker_running,
             "worker_complete": latest_worker_depth >= request.worker_target_depth and not worker_running,
             "source": source,
+            "cached_depth": int(cached_depth) if cached_depth else None,
+            "display_lock_depth": int(cached_depth) if cached_depth else None,
+            "display_unlock_depth": unlock_depth,
+            "display_locked": display_locked,
+            "background_analysis": display_locked,
             "best_move": snapshot.get("best_move"),
             "score_cp": snapshot.get("score_cp"),
             "score_mate": snapshot.get("score_mate"),
@@ -304,6 +340,7 @@ class AnalysisCoordinator:
         websocket: WebSocket,
         request: AnalysisRequest,
         initial_snapshot: dict[str, Any] | None,
+        cached_depth: int = 0,
     ) -> None:
         last_sent_signature = self._snapshot_signature(initial_snapshot)
         last_sent_depth = self._snapshot_depth(initial_snapshot)
@@ -311,7 +348,13 @@ class AnalysisCoordinator:
         while True:
             latest_snapshot = await self.get_snapshot(request.fen)
             worker_running = await self._job_is_running(request.fen)
-            display_snapshot = await self._resolve_display_snapshot(request, latest_snapshot, worker_running)
+            display_snapshot = await self._resolve_display_snapshot(
+                request,
+                latest_snapshot,
+                worker_running,
+                cached_depth,
+                initial_snapshot,
+            )
             display_signature = self._snapshot_signature(display_snapshot)
             display_depth = self._snapshot_depth(display_snapshot)
             latest_depth = self._snapshot_depth(latest_snapshot)
@@ -330,6 +373,7 @@ class AnalysisCoordinator:
                         source="database",
                         worker_depth=latest_depth,
                         worker_running=worker_running,
+                        cached_depth=cached_depth,
                     )
                 )
                 last_sent_signature = display_signature
@@ -346,6 +390,7 @@ class AnalysisCoordinator:
                                 source="database",
                                 worker_depth=latest_depth,
                                 worker_running=False,
+                                cached_depth=cached_depth,
                             )
                         )
                         last_sent_signature = latest_signature
@@ -358,6 +403,7 @@ class AnalysisCoordinator:
                             display_depth=last_sent_depth,
                             worker_depth=latest_depth,
                             worker_running=False,
+                            cached_depth=cached_depth,
                         )
                     )
                 else:
@@ -368,6 +414,7 @@ class AnalysisCoordinator:
                             "No analysis snapshot available",
                             worker_depth=0,
                             worker_running=False,
+                            cached_depth=cached_depth or None,
                         )
                     )
                 return
@@ -478,6 +525,7 @@ class AnalysisCoordinator:
                     "analysis_started",
                     "Database disabled; streaming engine directly",
                     worker_running=True,
+                    cached_depth=None,
                 )
             )
 
@@ -529,6 +577,7 @@ class AnalysisCoordinator:
                             source="engine",
                             worker_depth=depth,
                             worker_running=True,
+                            cached_depth=None,
                         )
                     )
                     last_sent_signature = signature
@@ -554,6 +603,7 @@ class AnalysisCoordinator:
                                 source="engine",
                                 worker_depth=depth,
                                 worker_running=False,
+                                cached_depth=None,
                             )
                         )
                     await websocket.send_json(
@@ -563,6 +613,7 @@ class AnalysisCoordinator:
                             display_depth=depth,
                             worker_depth=depth,
                             worker_running=False,
+                            cached_depth=None,
                         )
                     )
                     return
@@ -587,14 +638,20 @@ class AnalysisCoordinator:
         request: AnalysisRequest,
         latest_snapshot: dict[str, Any] | None,
         worker_running: bool,
+        cached_depth: int = 0,
+        cached_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         if not latest_snapshot:
             return None
 
+        latest_depth = self._snapshot_depth(latest_snapshot)
+        unlock_depth = self._display_unlock_depth(cached_depth)
+        if worker_running and cached_depth and unlock_depth and latest_depth < unlock_depth:
+            return cached_snapshot or latest_snapshot
+
         if not worker_running or request.display_lag_depth <= 0:
             return latest_snapshot
 
-        latest_depth = self._snapshot_depth(latest_snapshot)
         display_cap = latest_depth - request.display_lag_depth
         if display_cap < 1:
             return latest_snapshot
@@ -619,6 +676,12 @@ class AnalysisCoordinator:
         if not snapshot:
             return 0
         return len(snapshot.get("lines", []) or [])
+
+    @staticmethod
+    def _display_unlock_depth(cached_depth: int | None) -> int | None:
+        if not cached_depth:
+            return None
+        return min(MAX_ANALYSIS_DEPTH, int(cached_depth) + DEFAULT_CACHE_UNLOCK_DEPTH_DELTA)
 
     async def _get_job_worker_target_depth(self, fen: str) -> int:
         async with self._jobs_lock:
