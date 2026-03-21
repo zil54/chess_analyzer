@@ -103,15 +103,112 @@ npm run dev
 
 ### Analyzing Starting Position
 1. Open the application in your browser
-2. Click "Analyze (Live)" button
-3. Watch real-time evaluation updates in Line 1, 2, 3
-4. Evaluations display as depth increases
+2. Click "Analyze (Live)"
+3. The UI starts showing analysis as soon as data is available
+4. With the current defaults, the UI requests display depth `10` while the worker continues to depth `70`
+5. If database cache exists, the UI can show a cached snapshot first and then continue deepening live
+
+### Live Analysis Behavior
+
+The live-analysis flow uses four separate concepts:
+
+- **Display target depth** - when the UI has reached a useful minimum depth
+- **Worker target depth** - when the background analysis job is allowed to stop
+- **Display lag depth** - how far behind the worker the displayed snapshot is allowed to be
+- **Cache unlock depth delta** - how much deeper the worker must go before cached output is allowed to advance again
+
+Current default values:
+
+- **Display target**: `10`
+- **Worker target**: `70`
+- **Display lag**: `2`
+- **Cache unlock delta**: `3`
+
+#### Without Database
+
+When the database is disabled or not configured:
+
+- the app streams directly from Stockfish over WebSocket
+- there is no cache lookup
+- the first visible depth can be very low (including depth 1)
+- the UI trails the worker by about `display_lag_depth`
+- no analysis is persisted
+
+#### With Database
+
+When the database is enabled:
+
+- the app first looks for a stored analysis snapshot for the FEN
+- if found, it sends a cached snapshot immediately
+- then it starts or reuses a worker to deepen further
+- the worker can continue beyond the requested display target so the cache improves over time
+- snapshots are persisted while analysis is running
+
+#### Cached Snapshot Selection
+
+When multiple cached depths exist:
+
+- the backend tracks the deepest stored depth for worker progress
+- for display, it prefers a **richer multi-line snapshot** over a slightly deeper snapshot that only has line 1
+- this keeps the UI from regressing from 3 lines to 1 line just because a deeper partial depth was stored first
+
+#### Cached Display Lock While Deepening Further
+
+When a cached snapshot is shown from the database, the UI now follows a two-phase rule:
+
+1. **Show the cached snapshot immediately**
+2. **Keep that cached depth on screen until the worker reaches cached depth + cache unlock delta**
+3. Once the worker has reached that threshold, the UI starts advancing again using the normal display-lag rule
+
+Example with the default cache unlock delta of `3`:
+
+- cached depth shown immediately: `18`
+- worker continues in background: `19`, `20`, `21`, ...
+- UI stays on depth `18` while the worker is below `21`
+- when the worker reaches `21`, the UI is allowed to move forward again
+- with display lag `2`, the next visible depth would typically be `19`
+
+This avoids a jittery transition where cached data disappears too quickly, while still letting the database deepen in the background.
+
+#### UI Feedback While Cached Output Is Held
+
+While the UI is still pinned to the cached depth and the worker is deepening further:
+
+- the analysis lines stay visible
+- the live-analysis panel shows a spinner
+- the panel displays the message **`App is analyzing further.`**
+- the status line still shows current display depth and worker depth progress
+
+This makes it clear that the application is still working even though the displayed depth has not advanced yet.
+
+#### Cached Positions Can Deepen Further
+
+If a cached position already exceeds the requested worker target, the coordinator may still deepen further instead of stopping immediately.
+
+Example:
+
+- requested worker target: `70`
+- cached depth: `72` is impossible because max is `70`
+- requested worker target: `26`
+- cached depth: `41`
+- effective worker target becomes `47`
+
+The only time cached analysis ends immediately is when the cached position is already at the configured maximum depth.
+
+#### Status Text in the UI
+
+Representative status text now looks like:
+
+- `Live analysis · showing depth 8/10 · worker 10/70`
+- `Serving cached depth 40 while app analyzes further to worker depth 46 · showing depth 40 (requested 10) · worker 40/46`
+- `Analysis complete · showing depth 26 (requested 10) · worker 26/26`
 
 ### Uploading PGN Files
 1. Click "Upload PGN" button
 2. Select a PGN file from your computer
-3. Games are parsed and stored in the database
-4. Click any game to analyze it
+3. The file is parsed and loaded into the UI
+4. If the database is enabled, the game and analysis can be persisted
+5. If the database is disabled, navigation still works but persistence does not
 
 ### Setting Custom Position
 1. Use the chess board interface to set up pieces
@@ -121,7 +218,7 @@ npm run dev
 ### Navigation
 - **Move through game**: Use arrow keys or click moves
 - **Flip board**: Click "Flip" button
-- **Change depth**: Adjust depth slider (max typically 46)
+- **Live analysis defaults**: UI target depth `10`, worker target depth `70`, display lag `2`
 - **View variations**: Check Line 1, 2, 3 for top moves
 
 ## Database Setup (Optional)
@@ -149,9 +246,25 @@ Create a `.env` file in the project root:
 # Database configuration (optional)
 DATABASE_URL=postgresql://postgres:<your password>@localhost:5432/chess_analyzer
 
-# Log level
-LOG_LEVEL=INFO
+# Backend live-analysis defaults
+LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH=10
+LIVE_ANALYSIS_WORKER_TARGET_DEPTH=70
+LIVE_ANALYSIS_DISPLAY_LAG_DEPTH=2
+LIVE_ANALYSIS_CACHE_UNLOCK_DEPTH_DELTA=3
 ```
+
+If you run the Vite dev server from `app/frontend`, you can also create `app/frontend/.env`:
+
+```env
+VITE_API_BASE_URL=http://127.0.0.1:8000
+VITE_LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH=10
+VITE_LIVE_ANALYSIS_WORKER_TARGET_DEPTH=70
+VITE_LIVE_ANALYSIS_DISPLAY_LAG_DEPTH=2
+```
+
+`LIVE_ANALYSIS_CACHE_UNLOCK_DEPTH_DELTA` is backend-only because the server computes `display_unlock_depth` and sends it to the UI.
+
+Use `.env.example` in the repo root and `app/frontend/.env.example` as templates.
 
 ## Testing
 
@@ -182,94 +295,41 @@ pytest testing/ -k "pgn"
 
 ### REST API
 - `GET /` - Serve frontend
-- `GET /board?fen=...` - Get board SVG for position
+- `POST /svg` - Get board SVG for a position
 - `POST /games` - Upload PGN file
 - `GET /games` - List uploaded games
 
 ### WebSocket
-- `WS /analyze` - Real-time analysis stream
-  - Send: `{"fen": "...", "depth": 30}`
-  - Receive: `{"depth": 20, "line1": "e2e4 e7e5...", "score": 25, ...}`
+- `WS /ws/analyze` - real-time live analysis stream
+  - Send example:
+    ```json
+    {
+      "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+      "display_target_depth": 10,
+      "worker_target_depth": 70,
+      "display_lag_depth": 2
+    }
+    ```
+  - Legacy `depth` is still accepted and maps to `display_target_depth`
+  - Receive snapshot/status payloads that include fields such as:
+    - `depth`
+    - `display_target_depth`
+    - `worker_target_depth`
+    - `worker_depth`
+    - `worker_running`
+    - `lines`
 
 ## Configuration
 
+### Live Analysis Defaults
+- **Backend env**: `LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH`, `LIVE_ANALYSIS_WORKER_TARGET_DEPTH`, `LIVE_ANALYSIS_DISPLAY_LAG_DEPTH`, `LIVE_ANALYSIS_CACHE_UNLOCK_DEPTH_DELTA`
+- **Frontend env**: `VITE_LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH`, `VITE_LIVE_ANALYSIS_WORKER_TARGET_DEPTH`, `VITE_LIVE_ANALYSIS_DISPLAY_LAG_DEPTH`
+- **Fallback defaults**: display target `10`, worker target `70`, UI lag `2`, cache unlock delta `3`
+- **Maximum depth clamp**: `70`
+
 ### Depth Settings
-- **Minimum storage depth**: 15
-- **Max depth**: 46 (configurable)
-- **Line storage**: Top 3 variations per depth
-
-### Evaluation Update Strategy
-- Depths 1-14: Streamed to UI only (not stored)
-- Depths 15+: Stored in database + streamed to UI
-
-### "Database is NOT configured" Warning
-This is normal if you don't have PostgreSQL set up. The app works fine without it.
-
-### WebSocket Connection Issues
-- Ensure backend is running on `http://localhost:8000`
-- Check browser console for specific errors
-- Verify CORS settings if frontend is on different port
-
-### Stockfish Not Found
-- Verify `app/engine/sf.exe` exists
-- On Linux/Mac: Ensure Stockfish is installed and in PATH
-
-### PGN Upload Not Working
-- Verify DATABASE_URL is set in `.env`
-- Check PostgreSQL is running
-- Review backend logs for SQL errors
-
-## Project Structure Details
-
-### Backend
-- **main.py**: FastAPI app setup, WebSocket handlers
-- **api/routes.py**: REST endpoints
-- **db/db.py**: Database operations (psycopg)
-- **services/**: Business logic (PGN parsing, etc.)
-- **svg/svg.py**: Chess board SVG generation
-
-### Frontend
-- **index.html**: Entry point
-- **src/App.vue**: Main application component
-- **src/components/**: Board, evaluation display, controls
-
-### Engine
-- **engine.py**: Stockfish process management
-- **stockfish_session.py**: UCI protocol implementation
-
-## Performance Notes
-
-- Analysis updates stream in real-time via WebSocket
-- Database storage happens asynchronously
-- UI remains responsive during deep analysis
-- Evaluation lines persist across sessions if DB enabled
-
-## Contributing
-
-When adding features:
-1. Add tests to `testing/` folder
-2. Update this README with new endpoints/features
-3. Follow existing code style and patterns
-4. Test both with and without database
-
-
-## Support
-
-For issues or questions:
-1. Check the `documentation/` folder for detailed guides
-2. Review test files for usage examples
-3. Check logs in `app/backend/logs/`
-
-## Documentation
-
-Additional detailed documentation is available in `documentation/`:
-- `STOCKFISH_INTEGRATION.md` - Engine integration details
-- `PGN_UPLOAD_AUTO_ANALYSIS.md` - PGN handling guide
-- `RUN_WITHOUT_DATABASE.md` - No-database setup guide
-- `QUICK_START_NO_DB.md` - Quick setup without database
-
----
-
-**Current Status**: Fully functional with real-time analysis, PGN support, and optional PostgreSQL integration.
-
-
+- **Display target depth**: default `10`
+- **Worker target depth**: default `70`
+- **Display lag depth**: default `2`
+- **Cache unlock depth delta**: default `3`, clamped to `0..10`
+- **Top lines shown**: up to 3 principal variations

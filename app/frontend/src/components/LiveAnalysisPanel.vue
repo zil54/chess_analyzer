@@ -1,6 +1,11 @@
 <template>
-  <div class="live-output" v-if="lines && lines.length > 0">
-    <div class="live-output-scroll">
+  <div class="live-output" v-if="hasContent">
+    <div class="analysis-status" v-if="statusText">{{ statusText }}</div>
+    <div class="analysis-activity" v-if="isAnalyzingFurther || activityText">
+      <span v-if="isAnalyzingFurther" class="activity-spinner" aria-hidden="true"></span>
+      <span>{{ activityText }}</span>
+    </div>
+    <div class="live-output-scroll" v-if="lines && lines.length > 0">
       <div
         v-for="(depthBlock, depthIdx) in lines"
         :key="depthIdx"
@@ -29,7 +34,15 @@
 export default {
   name: 'LiveAnalysisPanel',
   props: {
-    lines: { type: Array, required: true }
+    lines: { type: Array, required: true },
+    statusText: { type: String, default: '' },
+    isAnalyzingFurther: { type: Boolean, default: false },
+    activityText: { type: String, default: '' }
+  },
+  computed: {
+    hasContent() {
+      return (this.lines && this.lines.length > 0) || !!this.statusText || !!this.activityText;
+    }
   }
 };
 </script>
@@ -41,6 +54,37 @@ export default {
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
+}
+
+.analysis-status {
+  margin-bottom: 10px;
+  font-weight: 600;
+  color: #2c3e50;
+}
+
+.analysis-activity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  color: #356859;
+  font-weight: 600;
+}
+
+.activity-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(76, 175, 80, 0.2);
+  border-top-color: #4caf50;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .pv-line-label {

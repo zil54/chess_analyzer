@@ -24,41 +24,55 @@ except Exception:  # pragma: no cover
 
 router = APIRouter()
 
-@router.post("/analyze_pgn")
-async def analyze_pgn(request: Request):
-    """
-    Parse a PGN and return all positions.
-    If DB_ENABLED, also persist the game and moves to the database.
-    Accepts either JSON with {"pgn": "..."} or multipart file upload
-    """
+
+async def _read_pgn_from_request(request: Request) -> str:
+    """Read PGN text from JSON or multipart form-data."""
     try:
-        # Try JSON first
         data = await request.json()
-        pgn_str = data.get("pgn", "")
+        pgn_str = (data.get("pgn") or "").strip()
     except Exception:
-        # Try form data with file upload
         try:
             form = await request.form()
-            if "file" in form:
-                file = form["file"]
-                pgn_text = await file.read()
-                pgn_str = pgn_text.decode('utf-8')
-            elif "pgn" in form:
-                pgn_str = form["pgn"]
+            file = form.get("file")
+            if file is None:
+                pgn_str = (form.get("pgn") or "").strip()
             else:
-                raise HTTPException(status_code=400, detail="No PGN data provided")
+                try:
+                    pgn_bytes = await file.read()
+                except Exception:
+                    pgn_bytes = file.file.read() if getattr(file, "file", None) else b""
+
+                if not pgn_bytes:
+                    raise HTTPException(status_code=400, detail="Uploaded PGN file is empty")
+
+                try:
+                    pgn_str = pgn_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    pgn_str = pgn_bytes.decode("latin-1")
+
+                pgn_str = pgn_str.strip()
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Failed to read PGN: {str(e)}")
 
     if not pgn_str:
         raise HTTPException(status_code=400, detail="PGN data is required")
 
+    return pgn_str
+
+
+def _parse_pgn_payload(pgn_str: str) -> tuple[dict, list[dict], list[dict], int]:
+    """Parse PGN into headers, UI positions, DB move rows, and ply count."""
     try:
         game = chess.pgn.read_game(io.StringIO(pgn_str))
         if not game:
             raise ValueError("No valid game found in PGN")
 
-        # Extract game metadata
+        game_errors = getattr(game, "errors", None) or []
+        if game_errors:
+            raise ValueError(str(game_errors[0]))
+
         headers = {
             "event": game.headers.get("Event", "Unknown"),
             "white": game.headers.get("White", "Unknown"),
@@ -69,27 +83,20 @@ async def analyze_pgn(request: Request):
         }
 
         board = game.board()
-        positions = []
-        move_rows = []
-
-        # Add starting position
-        positions.append({
+        positions = [{
             "move_number": 0,
             "fen": board.fen(),
             "move": None,
-            "san": None
-        })
-
-        # Store starting position as ply 0
-        move_rows.append({
+            "san": None,
+        }]
+        move_rows = [{
             "ply": 0,
             "san": "START",
             "fen": board.fen(),
             "comment": None,
             "cp_tag": False,
-        })
+        }]
 
-        # Process all moves
         ply = 0
         node = game
         for move in game.mainline_moves():
@@ -97,7 +104,6 @@ async def analyze_pgn(request: Request):
             san = board.san(move)
             board.push(move)
 
-            # Try to capture comments
             try:
                 node = node.variation(move)
                 comment = (node.comment or None) if node else None
@@ -108,9 +114,8 @@ async def analyze_pgn(request: Request):
                 "move_number": board.fullmove_number,
                 "fen": board.fen(),
                 "move": move.uci(),
-                "san": san
+                "san": san,
             })
-
             move_rows.append({
                 "ply": ply,
                 "san": san,
@@ -118,6 +123,28 @@ async def analyze_pgn(request: Request):
                 "comment": comment,
                 "cp_tag": False,
             })
+
+        if ply == 0:
+            raise ValueError("PGN must contain at least one legal move")
+
+        return headers, positions, move_rows, ply
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(str(e))
+
+
+@router.post("/analyze_pgn")
+async def analyze_pgn(request: Request):
+    """
+    Parse a PGN and return all positions.
+    If DB_ENABLED, also persist the game and moves to the database.
+    Accepts either JSON with {"pgn": "..."} or multipart file upload
+    """
+    pgn_str = await _read_pgn_from_request(request)
+
+    try:
+        headers, positions, move_rows, ply = _parse_pgn_payload(pgn_str)
 
         # Persist to DB if enabled
         game_id = None
@@ -167,103 +194,16 @@ async def create_game_from_pgn(request: Request):
     """Create a game from uploaded PGN, persist all positions (FENs) into DB.
 
     Accepts multipart/form-data with a `file` field (PGN), or JSON {"pgn": "..."}.
-    Returns: { id, headers, total_moves }
+    Returns: { id, headers, total_moves } when DB enabled, or { id, headers, total_moves, positions } when DB disabled
     """
     logger.info("=== POST /games called ===")
     logger.info(f"DB_ENABLED: {DB_ENABLED}")
 
-    if not DB_ENABLED:
-        logger.error("DB not enabled, returning 503")
-        raise HTTPException(status_code=503, detail="Database not configured. Set DATABASE_URL in .env file.")
-
-    # Read PGN (file or json)
-    pgn_str = ""
-    try:
-        data = await request.json()
-        pgn_str = (data.get("pgn") or "").strip()
-    except Exception:
-        # Multipart/form-data: Starlette returns an UploadFile instance
-        try:
-            form = await request.form()
-            file = form.get("file")
-            if file is None:
-                pgn_str = (form.get("pgn") or "").strip()
-            else:
-                # Starlette UploadFile has async read(); other objects might expose .file
-                try:
-                    pgn_bytes = await file.read()
-                except Exception:
-                    pgn_bytes = file.file.read() if getattr(file, "file", None) else b""
-
-                if not pgn_bytes:
-                    raise HTTPException(status_code=400, detail="Uploaded PGN file is empty")
-
-                try:
-                    pgn_str = pgn_bytes.decode("utf-8")
-                except UnicodeDecodeError:
-                    # Some PGNs can be latin-1; keep it permissive.
-                    pgn_str = pgn_bytes.decode("latin-1")
-
-                pgn_str = pgn_str.strip()
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Failed to read PGN: {str(e)}")
-
-    if not pgn_str:
-        raise HTTPException(status_code=400, detail="PGN data is required")
-
+    pgn_str = await _read_pgn_from_request(request)
     logger.info(f"Read PGN: {len(pgn_str)} bytes")
 
-    # Parse + convert to move list
     try:
-        game = chess.pgn.read_game(io.StringIO(pgn_str))
-        if not game:
-            raise ValueError("No valid game found in PGN")
-
-        headers = {
-            "event": game.headers.get("Event", "Unknown"),
-            "site": game.headers.get("Site", "Unknown"),
-            "white": game.headers.get("White", "Unknown"),
-            "black": game.headers.get("Black", "Unknown"),
-            "date": game.headers.get("Date", "Unknown"),
-            "result": game.headers.get("Result", "*")
-        }
-
-        board = game.board()
-        move_rows = []
-
-        # Store starting position as ply 0 (san required by schema; use a stable placeholder)
-        move_rows.append({
-            "ply": 0,
-            "san": "START",
-            "fen": board.fen(),
-            "comment": None,
-            "cp_tag": False,
-        })
-
-        ply = 0
-        node = game
-        for mv in game.mainline_moves():
-            ply += 1
-            san = board.san(mv)
-            board.push(mv)
-
-            # Try to capture comments if present (PGN node comments attach to the node *after* the move)
-            try:
-                node = node.variation(mv)
-                comment = (node.comment or None) if node else None
-            except Exception:
-                comment = None
-
-            move_rows.append({
-                "ply": ply,
-                "san": san,
-                "fen": board.fen(),
-                "comment": comment,
-                "cp_tag": False,
-            })
-
+        headers, positions, move_rows, ply = _parse_pgn_payload(pgn_str)
         logger.info(f"Parsed {ply} plies from PGN")
 
     except ValueError as e:
@@ -273,35 +213,46 @@ async def create_game_from_pgn(request: Request):
         logger.error(f"Error processing PGN: {e}")
         raise HTTPException(status_code=500, detail=f"Error processing PGN: {str(e)}")
 
-    try:
-        logger.info(f"Calling create_game...")
-        game_id = await create_game(pgn_str, headers)
-        logger.info(f"Game created with ID: {game_id}")
+    if DB_ENABLED:
+        # Persist to DB
+        try:
+            logger.info(f"Calling create_game...")
+            game_id = await create_game(pgn_str, headers)
+            logger.info(f"Game created with ID: {game_id}")
 
-        logger.info(f"Calling insert_moves with {len(move_rows)} rows...")
-        await insert_moves(game_id, move_rows)
-        logger.info(f"Moves inserted successfully")
+            logger.info(f"Calling insert_moves with {len(move_rows)} rows...")
+            await insert_moves(game_id, move_rows)
+            logger.info(f"Moves inserted successfully")
 
-    except Exception as e:
-        logger.error(f"DB error during insert: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"DB error: {str(e)}")
+        except Exception as e:
+            logger.error(f"DB error during insert: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"DB error: {str(e)}")
 
-    logger.info(
-        "Stored game_id=%s to DB (white=%s black=%s result=%s) with %s plies",
-        game_id,
-        headers.get("white"),
-        headers.get("black"),
-        headers.get("result"),
-        ply,
-    )
+        logger.info(
+            "Stored game_id=%s to DB (white=%s black=%s result=%s) with %s plies",
+            game_id,
+            headers.get("white"),
+            headers.get("black"),
+            headers.get("result"),
+            ply,
+        )
 
-    return {
-        "success": True,
-        "id": game_id,
-        "headers": headers,
-        "total_moves": ply,
-    }
-
+        return {
+            "success": True,
+            "id": game_id,
+            "headers": headers,
+            "total_moves": ply,
+        }
+    else:
+        # No DB: return positions directly
+        logger.info("DB not enabled, returning parsed positions without persistence")
+        return {
+            "success": True,
+            "id": None,
+            "headers": headers,
+            "total_moves": len(positions) - 1,
+            "positions": positions
+        }
 
 @router.get("/games")
 async def list_games():

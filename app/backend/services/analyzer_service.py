@@ -7,11 +7,14 @@ Implements a cache-then-compute pattern:
 3. If cache miss: run Stockfish, store result, return it
 """
 
-import os
+import asyncio
 import chess
 import chess.engine
 from typing import Dict, Optional
 from app.backend.logs.logger import logger
+from app.backend.runtime import get_stockfish_path
+from app.backend.services.stockfish_parser import parse_stockfish_line
+from app.engine.stockfish_session import StockfishSession
 
 # Try to import DB functions; gracefully degrade if not available
 try:
@@ -27,16 +30,125 @@ except Exception as e:
         pass
 
 
-def _get_stockfish_path() -> str:
-    """Resolve path to Stockfish executable."""
-    # Go up 3 levels from services/ to app/
-    app_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    stockfish_path = os.path.join(app_dir, "engine", "sf.exe")
+def _normalize_analysis_result(raw_result: Dict, requested_depth: int) -> Dict:
+    return {
+        "best_move": raw_result.get("best_move"),
+        "score_cp": raw_result.get("score_cp"),
+        "score_mate": raw_result.get("score_mate"),
+        "depth": raw_result.get("depth", requested_depth),
+        "pv": raw_result.get("pv", ""),
+    }
 
-    if not os.path.exists(stockfish_path):
-        raise FileNotFoundError(f"Stockfish not found at: {stockfish_path}")
 
-    return stockfish_path
+
+def _build_go_command(depth: int, time_limit: float) -> str:
+    command = ["go", "depth", str(max(1, int(depth)))]
+    if time_limit and time_limit > 0:
+        command.extend(["movetime", str(max(1, int(time_limit * 1000)))])
+    return " ".join(command)
+
+
+
+def _analyze_with_simple_engine(fen: str, depth: int, time_limit: float, stockfish_path: str) -> Dict:
+    board = chess.Board(fen)
+
+    with chess.engine.SimpleEngine.popen_uci(stockfish_path) as engine:
+        limit = chess.engine.Limit(time=time_limit, depth=depth)
+        info = engine.analyse(board, limit, multipv=1)
+
+        logger.info(f"Stockfish returned: {len(info) if info else 0} infos")
+
+        if not info:
+            logger.warning(f"No analysis returned for FEN: {fen}")
+            return {}
+
+        entry = info[0]
+        pv_moves = entry.get("pv", [])
+        score = entry.get("score")
+
+        logger.info(f"PV length: {len(pv_moves)}, Score: {score}")
+
+        score_cp = None
+        score_mate = None
+        if score:
+            relative_score = score.relative
+            if relative_score.is_mate():
+                score_mate = relative_score.mate()
+            else:
+                score_cp = score.white().score()
+
+        best_move = pv_moves[0].uci() if pv_moves else None
+        pv_str = " ".join(move.uci() for move in pv_moves[:10]) if pv_moves else ""
+        actual_depth = entry.get("depth", depth)
+
+        logger.info(f"Analysis result: best_move={best_move}, score_cp={score_cp}, depth={actual_depth}")
+
+        return {
+            "best_move": best_move,
+            "score_cp": score_cp,
+            "score_mate": score_mate,
+            "depth": actual_depth,
+            "pv": pv_str,
+        }
+
+
+
+def _analyze_with_stockfish_session(fen: str, depth: int, time_limit: float, stockfish_path: str) -> Dict:
+    session = StockfishSession(stockfish_path)
+    latest_result: Dict = {}
+
+    try:
+        session.send("uci")
+        session.send("isready")
+        for line in session.read_lines():
+            if line == "readyok":
+                break
+
+        session.send("ucinewgame")
+        session.send("setoption name UCI_AnalyseMode value true")
+        session.send("setoption name MultiPV value 1")
+        session.send(f"position fen {fen}")
+        session.send(_build_go_command(depth, time_limit))
+
+        for line in session.read_lines():
+            if line.startswith("bestmove"):
+                break
+
+            parsed = parse_stockfish_line(fen, line)
+            if parsed.get("pv"):
+                latest_result = parsed
+
+        if latest_result:
+            normalized = _normalize_analysis_result(latest_result, depth)
+            logger.info(
+                "Fallback Stockfish session result: best_move=%s, score_cp=%s, depth=%s",
+                normalized.get("best_move"),
+                normalized.get("score_cp"),
+                normalized.get("depth"),
+            )
+            return normalized
+
+        logger.warning("Fallback Stockfish session produced no PV for FEN: %s", fen)
+        return {}
+    finally:
+        try:
+            session.send("stop")
+        except Exception:
+            pass
+        try:
+            session.send("quit")
+        except Exception:
+            pass
+        try:
+            if session.process.poll() is None:
+                session.process.terminate()
+                session.process.wait(timeout=2)
+        except Exception:
+            try:
+                session.process.kill()
+            except Exception:
+                pass
+
 
 
 def _analyze_with_stockfish(fen: str, depth: int = 20, time_limit: float = 0.5) -> Dict:
@@ -52,57 +164,18 @@ def _analyze_with_stockfish(fen: str, depth: int = 20, time_limit: float = 0.5) 
         Dict with: best_move, score_cp, score_mate, depth, pv
     """
     try:
-        board = chess.Board(fen)
-        stockfish_path = _get_stockfish_path()
+        chess.Board(fen)
+        stockfish_path = get_stockfish_path()
 
         logger.info(f"Starting Stockfish analysis: depth={depth}, time={time_limit}s")
 
-        with chess.engine.SimpleEngine.popen_uci(stockfish_path) as engine:
-            # Use both depth and time limits; whichever is reached first
-            limit = chess.engine.Limit(time=time_limit, depth=depth)
-            info = engine.analyse(board, limit, multipv=1)
-
-            logger.info(f"Stockfish returned: {len(info) if info else 0} infos")
-
-            if not info:
-                logger.warning(f"No analysis returned for FEN: {fen}")
-                return {}
-
-            entry = info[0]
-            pv_moves = entry.get("pv", [])
-            score = entry.get("score")
-
-            logger.info(f"PV length: {len(pv_moves)}, Score: {score}")
-
-            # Extract score in centipawns or mate
-            score_cp = None
-            score_mate = None
-            if score:
-                if score.is_mate():
-                    score_mate = score.mate()
-                else:
-                    # White's perspective
-                    score_cp = score.white().score()
-
-            # Get best move (first move in PV)
-            best_move = pv_moves[0].uci() if pv_moves else None
-
-            # Convert PV to UCI string
-            pv_str = " ".join(move.uci() for move in pv_moves[:10]) if pv_moves else ""
-
-            # Get actual depth reached
-            actual_depth = entry.get("depth", depth)
-
-            logger.info(f"Analysis result: best_move={best_move}, score_cp={score_cp}, depth={actual_depth}")
-
-            return {
-                "best_move": best_move,
-                "score_cp": score_cp,
-                "score_mate": score_mate,
-                "depth": actual_depth,
-                "pv": pv_str,
-            }
-
+        try:
+            return _analyze_with_simple_engine(fen, depth, time_limit, stockfish_path)
+        except NotImplementedError:
+            logger.warning(
+                "python-chess engine launch is not supported in this runtime; falling back to direct UCI session"
+            )
+            return _analyze_with_stockfish_session(fen, depth, time_limit, stockfish_path)
     except Exception as e:
         logger.error(f"Stockfish analysis failed for FEN '{fen}': {e}", exc_info=True)
         return {}
@@ -176,7 +249,7 @@ async def analyze_position(
 
     # Cache miss or DB disabled: run Stockfish
     logger.info(f"Cache miss or DB disabled, running Stockfish analysis...")
-    eval_result = _analyze_with_stockfish(fen, depth=depth, time_limit=time_limit)
+    eval_result = await asyncio.to_thread(_analyze_with_stockfish, fen, depth, time_limit)
 
     if not eval_result:
         logger.warning(f"Stockfish returned empty result for FEN: {fen[:40]}...")
@@ -200,7 +273,7 @@ async def analyze_position(
                 depth=eval_result.get("depth"),
                 pv=eval_result.get("pv")
             )
-            logger.info("[OK] Stored evaluation in DB for FEN: {0}...".format(fen[:40]))
+            logger.info("[OK] Stored evaluation in DB for FEN: %s...", fen[:40])
         except Exception as e:
             logger.error(f"Error storing evaluation in DB: {e}", exc_info=True)
 
