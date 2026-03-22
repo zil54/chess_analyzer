@@ -1,3 +1,17 @@
+  .mid-right { grid-row: 3; }
+  .bottom-left { grid-row: 4; }
+  .bottom-right { display: none; }
+  .bottom-left,
+  .bottom-right {
+    grid-template-rows: auto auto auto auto;
+.bottom-right {
+  grid-column: 2;
+  grid-row: 3;
+}
+
+
+      <!-- bottom-right intentionally empty for now -->
+      <div class="bottom-right" />
 <template>
   <div class="analyzer">
     <div class="layout">
