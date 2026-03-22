@@ -219,7 +219,15 @@ async def test_handle_websocket_holds_cached_snapshot_until_worker_reaches_cache
     await coordinator.handle_websocket(websocket)
 
     snapshot_messages = [message for message in websocket.messages if message["type"] == "snapshot"]
+    progress_statuses = [
+        message
+        for message in websocket.messages
+        if message["type"] == "status" and message["status"] == "analysis_running"
+    ]
     assert [message["depth"] for message in snapshot_messages] == [18, 19, 22]
+    assert [message["worker_depth"] for message in progress_statuses] == [19, 20]
+    assert all(message["display_depth"] == 18 for message in progress_statuses)
+    assert all(message["display_locked"] is True for message in progress_statuses)
     assert snapshot_messages[0]["display_locked"] is True
     assert snapshot_messages[0]["display_unlock_depth"] == 21
     assert snapshot_messages[1]["worker_depth"] == 21
@@ -347,17 +355,83 @@ async def test_handle_websocket_starts_worker_and_streams_lagged_db_snapshots(mo
 
     await coordinator.handle_websocket(websocket)
 
+    progress_statuses = [
+        message
+        for message in websocket.messages
+        if message["type"] == "status" and message["status"] == "analysis_running"
+    ]
+
     assert started == [("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 18)]
-    assert [message["type"] for message in websocket.messages] == ["snapshot", "status", "snapshot", "snapshot", "status"]
+    assert [message["type"] for message in websocket.messages] == ["snapshot", "status", "status", "status", "snapshot", "snapshot", "status"]
     assert websocket.messages[0]["depth"] == 12
     assert websocket.messages[0]["display_locked"] is True
     assert websocket.messages[0]["display_unlock_depth"] == 15
     assert websocket.messages[1]["status"] == "analysis_started"
     assert websocket.messages[1]["display_locked"] is True
-    assert websocket.messages[2]["depth"] == 16
-    assert websocket.messages[2]["worker_depth"] == 18
-    assert websocket.messages[2]["display_locked"] is False
-    assert websocket.messages[3]["depth"] == 18
-    assert websocket.messages[3]["worker_running"] is False
+    assert [message["worker_depth"] for message in progress_statuses] == [13, 14]
+    assert all(message["display_depth"] == 12 for message in progress_statuses)
+    assert all(message["display_locked"] is True for message in progress_statuses)
+    assert websocket.messages[4]["depth"] == 16
+    assert websocket.messages[4]["worker_depth"] == 18
+    assert websocket.messages[4]["display_locked"] is False
+    assert websocket.messages[5]["depth"] == 18
+    assert websocket.messages[5]["worker_running"] is False
     assert websocket.messages[-1]["status"] == "complete"
     assert websocket.messages[-1]["display_locked"] is False
+
+
+@pytest.mark.asyncio
+async def test_handle_websocket_reports_worker_progress_while_cached_depth_is_locked(monkeypatch) -> None:
+    coordinator = AnalysisCoordinator(poll_interval=0)
+    websocket = FakeWebSocket(
+        '{"fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", "depth": 10, "worker_target_depth": 70, "display_lag_depth": 2}'
+    )
+    latest_depths = iter([40, 41, 42, 43])
+    running_states = iter([True, True, False])
+
+    monkeypatch.setattr(coordinator, "_db_enabled", lambda: True)
+
+    async def fake_get_snapshot(fen: str, target_depth: int | None = None, prefer_richer_lines: bool = False):
+        if target_depth is None:
+            try:
+                depth = next(latest_depths)
+            except StopIteration:
+                depth = 43
+            return _snapshot(depth)
+
+        return _snapshot(min(target_depth, 43))
+
+    async def fake_ensure_analysis(fen: str, worker_target_depth: int, multipv: int = 3) -> bool:
+        return True
+
+    async def fake_job_is_running(fen: str) -> bool:
+        try:
+            return next(running_states)
+        except StopIteration:
+            return False
+
+    monkeypatch.setattr(coordinator, "get_snapshot", fake_get_snapshot)
+    monkeypatch.setattr(coordinator, "ensure_analysis", fake_ensure_analysis)
+    monkeypatch.setattr(coordinator, "_job_is_running", fake_job_is_running)
+
+    await coordinator.handle_websocket(websocket)
+
+    snapshot_messages = [message for message in websocket.messages if message["type"] == "snapshot"]
+    progress_statuses = [
+        message
+        for message in websocket.messages
+        if message["type"] == "status" and message["status"] == "analysis_running"
+    ]
+
+    assert [message["depth"] for message in snapshot_messages] == [40, 43]
+    assert snapshot_messages[0]["display_locked"] is True
+    assert snapshot_messages[0]["display_unlock_depth"] == 43
+    assert [message["worker_depth"] for message in progress_statuses] == [41, 42]
+    assert all(message["display_depth"] == 40 for message in progress_statuses)
+    assert all(message["display_locked"] is True for message in progress_statuses)
+    assert websocket.messages[-2]["type"] == "snapshot"
+    assert websocket.messages[-2]["worker_running"] is False
+    assert websocket.messages[-1]["status"] == "complete"
+    assert websocket.messages[-1]["worker_depth"] == 43
+
+
