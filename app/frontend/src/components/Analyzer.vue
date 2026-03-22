@@ -11,6 +11,7 @@
           @go-prev="prevMove"
           @go-next="nextMove"
           @go-last="lastMove"
+          @select-move="selectMove"
         />
       </div>
 
@@ -20,6 +21,14 @@
           @flip-board="flipBoard"
         />
       </div>
+
+      <aside class="top-right">
+        <PgnMovesList
+          :pgnData="pgnData"
+          :currentMove="currentMove"
+          @select-move="selectMove"
+        />
+      </aside>
 
       <aside class="mid-right">
         <LiveAnalysisPanel
@@ -42,9 +51,6 @@
           @stop-analysis="stopLiveAnalysis"
         />
       </div>
-
-      <!-- bottom-right intentionally empty for now -->
-      <div class="bottom-right" />
     </div>
   </div>
 </template>
@@ -58,6 +64,7 @@ import {
 } from '../config/liveAnalysis';
 import FenControls from './FenControls.vue';
 import PgnPanel from './PgnPanel.vue';
+import PgnMovesList from './PgnMovesList.vue';
 import BoardDisplay from './BoardDisplay.vue';
 import LiveAnalysisPanel from './LiveAnalysisPanel.vue';
 
@@ -98,6 +105,7 @@ export default {
   components: {
     FenControls,
     PgnPanel,
+    PgnMovesList,
     BoardDisplay,
     LiveAnalysisPanel
   },
@@ -275,7 +283,7 @@ export default {
       }
 
       const displayText = displayDepth > displayTarget
-        ? `showing depth ${displayDepth} (requested ${displayTarget})`
+        ? `showing depth ${displayDepth}`
         : `showing depth ${displayDepth}/${displayTarget}`;
       const workerText = `worker ${workerDepth}/${workerTarget}`;
       const progressText = `${displayText} · ${workerText}`;
@@ -517,6 +525,11 @@ export default {
       const position = this.pgnData.positions[moveIndex];
       this.fen = position.fen;
       await this.renderBoard();
+    },
+
+    async selectMove(moveIndex) {
+      this.currentMove = moveIndex;
+      await this.showPosition(moveIndex);
     },
 
     async nextMove() {
@@ -771,6 +784,12 @@ input, button {
   min-width: 0;
 }
 
+.top-right {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+}
+
 .mid-right {
   grid-column: 2;
   grid-row: 2;
@@ -783,28 +802,23 @@ input, button {
   min-width: 0;
 }
 
-.bottom-right {
-  grid-column: 2;
-  grid-row: 3;
-}
-
 @media (max-width: 980px) {
   .layout {
     grid-template-columns: 1fr;
-    grid-template-rows: auto auto auto auto;
+    grid-template-rows: auto auto auto auto auto;
   }
   .top-left,
   .mid-left,
+  .top-right,
   .mid-right,
-  .bottom-left,
-  .bottom-right {
+  .bottom-left {
     grid-column: 1;
   }
   .top-left { grid-row: 1; }
   .mid-left { grid-row: 2; }
-  .mid-right { grid-row: 3; }
-  .bottom-left { grid-row: 4; }
-  .bottom-right { display: none; }
+  .top-right { grid-row: 3; }
+  .mid-right { grid-row: 4; }
+  .bottom-left { grid-row: 5; }
 }
 
 /* Live analysis card styling (kept here because LiveAnalysisPanel only defines inner scroll styles) */

@@ -7,7 +7,7 @@ def run_stockfish(fen: str, lines: int = 3) -> dict:
 
     # Resolve path to sf.exe relative to backend/engine.py
     base_dir = os.path.dirname(os.path.dirname(__file__))  # chess_analyzer/
-    stockfish_path = os.path.join(base_dir, "engine", "sf.exe")
+    stockfish_path = os.path.join(base_dir, "engine", "sf_18.exe")
 
     if not os.path.exists(stockfish_path):
         raise FileNotFoundError(f"Stockfish not found at: {stockfish_path}")

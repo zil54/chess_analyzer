@@ -344,6 +344,7 @@ class AnalysisCoordinator:
     ) -> None:
         last_sent_signature = self._snapshot_signature(initial_snapshot)
         last_sent_depth = self._snapshot_depth(initial_snapshot)
+        last_reported_worker_depth = last_sent_depth
 
         while True:
             latest_snapshot = await self.get_snapshot(request.fen)
@@ -378,6 +379,34 @@ class AnalysisCoordinator:
                 )
                 last_sent_signature = display_signature
                 last_sent_depth = display_depth
+                last_reported_worker_depth = max(last_reported_worker_depth, latest_depth)
+            elif worker_running and latest_depth > last_reported_worker_depth:
+                await websocket.send_json(
+                    self.build_status_event(
+                        request,
+                        "analysis_running",
+                        display_depth=display_depth or last_sent_depth,
+                        worker_depth=latest_depth,
+                        worker_running=True,
+                        cached_depth=cached_depth,
+                    )
+                )
+                unlock_depth = self._display_unlock_depth(cached_depth)
+                if cached_depth and unlock_depth and latest_depth < unlock_depth:
+                    logger.info(
+                        "Live analysis worker depth advanced to %s while cached depth %s remains locked until %s for fen %s",
+                        latest_depth,
+                        cached_depth,
+                        unlock_depth,
+                        request.fen,
+                    )
+                else:
+                    logger.info(
+                        "Live analysis worker depth advanced to %s for fen %s",
+                        latest_depth,
+                        request.fen,
+                    )
+                last_reported_worker_depth = latest_depth
 
             if not worker_running:
                 if latest_snapshot:
@@ -395,6 +424,7 @@ class AnalysisCoordinator:
                         )
                         last_sent_signature = latest_signature
                         last_sent_depth = latest_depth
+                    last_reported_worker_depth = max(last_reported_worker_depth, latest_depth)
 
                     await websocket.send_json(
                         self.build_status_event(
@@ -405,6 +435,11 @@ class AnalysisCoordinator:
                             worker_running=False,
                             cached_depth=cached_depth,
                         )
+                    )
+                    logger.info(
+                        "Live analysis completed at worker depth %s for fen %s",
+                        latest_depth,
+                        request.fen,
                     )
                 else:
                     await websocket.send_json(

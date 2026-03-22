@@ -7,7 +7,7 @@ import chess
 import chess.engine
 
 try:
-    stockfish_path = '../app/engine/sf.exe'
+    stockfish_path = '../app/engine/sf_18.exe'
 
     if not os.path.exists(stockfish_path):
         print(f"✗ Stockfish not found at {stockfish_path}")

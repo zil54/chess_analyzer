@@ -16,7 +16,7 @@
       <div v-if="pgnData" class="move-controls">
         <button @click="$emit('go-first')" :disabled="currentMove === 0">⏮ First</button>
         <button @click="$emit('go-prev')" :disabled="currentMove === 0">◀ Prev</button>
-        <span>Move {{ currentMove }} / {{ pgnData.total_moves }}</span>
+        <span>Ply {{ currentMove }}/{{ pgnData.total_moves }}</span>
         <button
           @click="$emit('go-next')"
           :disabled="currentMove === pgnData.total_moves"
@@ -61,6 +61,7 @@ export default {
 .pgn-controls {
   margin-top: 10px;
 }
+
 
 .pgn-upload-btn {
   padding: 8px 16px;
