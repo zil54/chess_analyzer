@@ -1,7 +1,6 @@
 <template>
   <div class="board-display">
     <div id="svg-container" v-html="svgBoard"></div>
-    <button @click="$emit('flip-board')" class="flip-btn">Flip Board</button>
   </div>
 </template>
 
@@ -17,25 +16,20 @@ export default {
 <style scoped>
 .board-display {
   margin-top: 10px;
-  display: inline-block;
+  width: 100%;
+  display: flex;
+  justify-content: center;
 }
 
-/* Fixed board area to avoid layout shifts when analysis grows */
 #svg-container {
-  width: 400px; /* adjust if your board SVG is larger */
-  height: 400px;
+  width: min(100%, 440px);
+  aspect-ratio: 1 / 1;
   overflow: hidden;
 }
 
-/* Reuse the original flip button styling from Analyzer.vue */
-.flip-btn {
-  background-color: #2196F3;
-  color: white;
-  padding: 6px 12px;
-  margin: 8px 5px 0;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 14px;
+#svg-container :deep(svg) {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 </style>

@@ -9,6 +9,7 @@ try:
         create_game,
         insert_moves,
         get_moves,
+        get_game_raw_pgn,
         get_eval,
         DB_ENABLED,
     )
@@ -62,16 +63,130 @@ async def _read_pgn_from_request(request: Request) -> str:
     return pgn_str
 
 
-def _parse_pgn_payload(pgn_str: str) -> tuple[dict, list[dict], list[dict], int]:
-    """Parse PGN into headers, UI positions, DB move rows, and ply count."""
-    try:
-        game = chess.pgn.read_game(io.StringIO(pgn_str))
-        if not game:
-            raise ValueError("No valid game found in PGN")
+def _read_pgn_game(pgn_str: str) -> chess.pgn.Game:
+    game = chess.pgn.read_game(io.StringIO(pgn_str))
+    if not game:
+        raise ValueError("No valid game found in PGN")
 
-        game_errors = getattr(game, "errors", None) or []
-        if game_errors:
-            raise ValueError(str(game_errors[0]))
+    game_errors = getattr(game, "errors", None) or []
+    if game_errors:
+        raise ValueError(str(game_errors[0]))
+
+    return game
+
+
+def _export_pgn_movetext(game: chess.pgn.Game) -> str:
+    exporter = chess.pgn.StringExporter(
+        headers=False,
+        comments=True,
+        variations=True,
+        columns=None,
+    )
+    return game.accept(exporter).strip()
+
+
+def _extract_pgn_movetext(pgn_str: str) -> str:
+    try:
+        return _export_pgn_movetext(_read_pgn_game(pgn_str))
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(str(e))
+
+
+def _build_variation_tree(game: chess.pgn.Game) -> tuple[dict, list[int]]:
+    board = game.board()
+    next_node_id = 1
+    mainline_node_ids = [0]
+
+    root = {
+        "id": 0,
+        "ply": 0,
+        "move_number": 0,
+        "color": None,
+        "move": None,
+        "san": None,
+        "fen": board.fen(),
+        "comment": (game.comment or None) if getattr(game, "comment", None) else None,
+        "starting_comment": None,
+        "is_mainline": True,
+        "mainline_index": 0,
+        "anchor_mainline_index": 0,
+        "variations": [],
+    }
+
+    def build_children(
+        pgn_node: chess.pgn.GameNode,
+        current_board: chess.Board,
+        parent_ply: int,
+        parent_mainline_index: int,
+        follows_mainline: bool,
+    ) -> list[dict]:
+        nonlocal next_node_id
+
+        children: list[dict] = []
+        for variation_index, child in enumerate(pgn_node.variations):
+            move = child.move
+            san = current_board.san(move)
+            move_number = current_board.fullmove_number
+            color = "w" if current_board.turn == chess.WHITE else "b"
+
+            child_board = current_board.copy(stack=False)
+            child_board.push(move)
+
+            is_mainline = follows_mainline and variation_index == 0
+            node_id = next_node_id
+            next_node_id += 1
+
+            mainline_index = (parent_mainline_index + 1) if is_mainline else None
+            anchor_mainline_index = parent_mainline_index
+            if is_mainline and mainline_index is not None:
+                anchor_mainline_index = mainline_index
+                mainline_node_ids.append(node_id)
+
+            node = {
+                "id": node_id,
+                "ply": parent_ply + 1,
+                "move_number": move_number,
+                "color": color,
+                "move": move.uci(),
+                "san": san,
+                "fen": child_board.fen(),
+                "comment": (child.comment or None) if getattr(child, "comment", None) else None,
+                "starting_comment": (getattr(child, "starting_comment", None) or None),
+                "is_mainline": is_mainline,
+                "mainline_index": mainline_index,
+                "anchor_mainline_index": anchor_mainline_index,
+                "variations": [],
+            }
+            node["variations"] = build_children(
+                child,
+                child_board,
+                node["ply"],
+                mainline_index if mainline_index is not None else anchor_mainline_index,
+                is_mainline,
+            )
+            children.append(node)
+
+        return children
+
+    root["variations"] = build_children(game, board, 0, 0, True)
+    return root, mainline_node_ids
+
+
+def _extract_pgn_tree(pgn_str: str) -> tuple[dict, list[int]]:
+    try:
+        return _build_variation_tree(_read_pgn_game(pgn_str))
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(str(e))
+
+
+def _parse_pgn_payload(pgn_str: str) -> tuple[dict, list[dict], list[dict], int, str, dict, list[int]]:
+    """Parse PGN into headers, UI positions, DB move rows, ply count, movetext, and variation tree."""
+    try:
+        game = _read_pgn_game(pgn_str)
 
         headers = {
             "event": game.headers.get("Event", "Unknown"),
@@ -127,7 +242,8 @@ def _parse_pgn_payload(pgn_str: str) -> tuple[dict, list[dict], list[dict], int]
         if ply == 0:
             raise ValueError("PGN must contain at least one legal move")
 
-        return headers, positions, move_rows, ply
+        variation_tree, mainline_node_ids = _build_variation_tree(game)
+        return headers, positions, move_rows, ply, _export_pgn_movetext(game), variation_tree, mainline_node_ids
     except ValueError:
         raise
     except Exception as e:
@@ -144,7 +260,7 @@ async def analyze_pgn(request: Request):
     pgn_str = await _read_pgn_from_request(request)
 
     try:
-        headers, positions, move_rows, ply = _parse_pgn_payload(pgn_str)
+        headers, positions, move_rows, ply, movetext, variation_tree, mainline_node_ids = _parse_pgn_payload(pgn_str)
 
         # Persist to DB if enabled
         game_id = None
@@ -165,7 +281,10 @@ async def analyze_pgn(request: Request):
             "game_id": game_id,
             "headers": headers,
             "total_moves": len(positions) - 1,
-            "positions": positions
+            "positions": positions,
+            "movetext": movetext,
+            "variation_tree": variation_tree,
+            "mainline_node_ids": mainline_node_ids,
         }
 
     except ValueError as e:
@@ -203,7 +322,7 @@ async def create_game_from_pgn(request: Request):
     logger.info(f"Read PGN: {len(pgn_str)} bytes")
 
     try:
-        headers, positions, move_rows, ply = _parse_pgn_payload(pgn_str)
+        headers, positions, move_rows, ply, movetext, variation_tree, mainline_node_ids = _parse_pgn_payload(pgn_str)
         logger.info(f"Parsed {ply} plies from PGN")
 
     except ValueError as e:
@@ -242,6 +361,10 @@ async def create_game_from_pgn(request: Request):
             "id": game_id,
             "headers": headers,
             "total_moves": ply,
+            "positions": positions,
+            "movetext": movetext,
+            "variation_tree": variation_tree,
+            "mainline_node_ids": mainline_node_ids,
         }
     else:
         # No DB: return positions directly
@@ -251,7 +374,10 @@ async def create_game_from_pgn(request: Request):
             "id": None,
             "headers": headers,
             "total_moves": len(positions) - 1,
-            "positions": positions
+            "positions": positions,
+            "movetext": movetext,
+            "variation_tree": variation_tree,
+            "mainline_node_ids": mainline_node_ids,
         }
 
 @router.get("/games")
@@ -320,11 +446,25 @@ async def fetch_game_moves(game_id: int):
         for r in rows
     ]
 
+    movetext = None
+    variation_tree = None
+    mainline_node_ids = None
+    raw_pgn = await get_game_raw_pgn(game_id)
+    if raw_pgn:
+        try:
+            movetext = _extract_pgn_movetext(raw_pgn)
+            variation_tree, mainline_node_ids = _extract_pgn_tree(raw_pgn)
+        except ValueError as e:
+            logger.warning("Unable to export PGN movetext for game_id=%s: %s", game_id, e)
+
     return {
         "success": True,
         "game_id": game_id,
         "total_moves": max(0, len(positions) - 1),
         "positions": positions,
+        "movetext": movetext,
+        "variation_tree": variation_tree,
+        "mainline_node_ids": mainline_node_ids,
     }
 
 

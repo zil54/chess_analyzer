@@ -228,6 +228,21 @@ async def get_moves(game_id: int) -> list[dict]:
     return rows or []
 
 
+async def get_game_raw_pgn(game_id: int) -> Optional[str]:
+    async with await get_connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT raw_pgn
+                FROM public.games
+                WHERE id = %s
+                """,
+                (game_id,),
+            )
+            row = await cur.fetchone()
+    return row["raw_pgn"] if row else None
+
+
 # -------------------------------------------------------------------
 # Evals helpers
 # -------------------------------------------------------------------
