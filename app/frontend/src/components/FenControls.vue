@@ -25,10 +25,8 @@
         :disabled="!canAnalyze || !isFenValid || isAnalyzing"
         @click="$emit('start-analysis')"
       >
-        <svg aria-hidden="true" viewBox="0 0 24 24" class="toolbar-icon" focusable="false">
-          <rect x="7" y="7" width="10" height="10" rx="2" />
-          <rect x="10" y="10" width="4" height="4" rx="1" class="toolbar-icon-core" />
-          <path d="M9 2v3M12 2v3M15 2v3M9 19v3M12 19v3M15 19v3M2 9h3M2 12h3M2 15h3M19 9h3M19 12h3M19 15h3" />
+        <svg aria-hidden="true" viewBox="0 0 24 24" class="toolbar-icon toolbar-icon-solid" focusable="false">
+          <path d="M12 3.25a3.25 3.25 0 1 1 0 6.5a3.25 3.25 0 0 1 0-6.5Zm0 7.75c-2.88 0-5 2.15-5 4.85c0 1.18.42 2.22 1.13 3.03L7 21h10l-1.13-2.12c.71-.81 1.13-1.85 1.13-3.03c0-2.7-2.12-4.85-5-4.85Zm-3.67 8.5l.53-1h6.28l.53 1H8.33Z" />
         </svg>
       </button>
       <button
@@ -111,6 +109,11 @@ export default {
   stroke-width: 1.8;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+.toolbar-icon-solid {
+  fill: currentColor;
+  stroke: none;
 }
 
 .toolbar-icon-core {
