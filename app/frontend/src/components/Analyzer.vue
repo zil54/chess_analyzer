@@ -6,7 +6,7 @@
           :pgnData="pgnData"
           :currentMove="currentMove"
           :currentPosition="currentPosition"
-          @upload-pgn="uploadPGN"
+          :currentTreeNode="currentTreeNode"
           @go-first="firstMove"
           @go-prev="prevMove"
           @go-next="nextMove"
@@ -15,31 +15,7 @@
         />
       </div>
 
-      <div class="mid-left">
-        <BoardDisplay
-          :svgBoard="svgBoard"
-          @flip-board="flipBoard"
-        />
-      </div>
-
-      <aside class="top-right">
-        <PgnMovesList
-          :pgnData="pgnData"
-          :currentMove="currentMove"
-          @select-move="selectMove"
-        />
-      </aside>
-
-      <aside class="mid-right">
-        <LiveAnalysisPanel
-          :lines="currentAnalysisLines"
-          :statusText="analysisStatusText"
-          :isAnalyzingFurther="analysisFurtherActive"
-          :activityText="analysisFurtherText"
-        />
-      </aside>
-
-      <div class="bottom-left">
+      <div class="mid-left board-area">
         <FenControls
           :fen="fen"
           :isFenValid="isFenValid"
@@ -49,8 +25,31 @@
           @render-board="renderBoard"
           @start-analysis="analyzeLive"
           @stop-analysis="stopLiveAnalysis"
+          @upload-pgn="uploadPGN"
+          @flip-board="flipBoard"
+        />
+
+        <BoardDisplay
+          :svgBoard="svgBoard"
+        />
+
+        <LiveAnalysisPanel
+          :lines="currentAnalysisLines"
+          :statusText="analysisStatusText"
+          :isAnalyzingFurther="analysisFurtherActive"
+          :activityText="analysisFurtherText"
         />
       </div>
+
+      <aside class="right-panel">
+        <PgnMovesList
+          :pgnData="pgnData"
+          :currentMove="currentMove"
+          :currentNodeId="currentTreeNodeId"
+          @select-move="selectMove"
+          @select-tree-node="selectTreeNode"
+        />
+      </aside>
     </div>
   </div>
 </template>
@@ -117,6 +116,7 @@ export default {
       socket: null,
       pgnData: null,
       currentMove: 0,
+      currentTreeNodeId: 0,
       // each entry: { depthLabel: string, lines: [{ label: string, text: string }] }
       currentAnalysisLines: [],
       currentAnalysisDepth: 1,
@@ -159,7 +159,35 @@ export default {
     },
     currentPosition() {
       if (!this.pgnData) return null;
+      if (this.currentTreeNode?.fen) {
+        return this.currentTreeNode;
+      }
       return this.pgnData.positions[this.currentMove];
+    },
+    currentTreeNode() {
+      if (!this.pgnData?.variation_tree) return null;
+      return this.treeNodeMap[this.currentTreeNodeId] || this.pgnData.variation_tree;
+    },
+    treeNodeMap() {
+      const root = this.pgnData?.variation_tree;
+      if (!root) return {};
+
+      const map = {};
+      const stack = [root];
+      while (stack.length) {
+        const node = stack.pop();
+        if (!node || typeof node !== 'object') continue;
+        if (Number.isInteger(node.id)) {
+          map[node.id] = node;
+        }
+
+        const variations = Array.isArray(node.variations) ? node.variations : [];
+        for (let index = variations.length - 1; index >= 0; index -= 1) {
+          stack.push(variations[index]);
+        }
+      }
+
+      return map;
     }
   },
 
@@ -451,7 +479,10 @@ export default {
               success: true,
               headers: created.headers,
               total_moves: created.total_moves,
-              positions: created.positions
+              positions: created.positions,
+              movetext: created.movetext || null,
+              variation_tree: created.variation_tree || null,
+              mainline_node_ids: Array.isArray(created.mainline_node_ids) ? created.mainline_node_ids : null,
             };
           } else if (this.gameId != null) {
             const movesRes = await fetch(this.apiUrl(`/games/${this.gameId}/moves`));
@@ -471,7 +502,12 @@ export default {
               success: true,
               headers: created.headers,
               total_moves: movesPayload.total_moves,
-              positions: movesPayload.positions
+              positions: movesPayload.positions,
+              movetext: movesPayload.movetext || created.movetext || null,
+              variation_tree: movesPayload.variation_tree || created.variation_tree || null,
+              mainline_node_ids: Array.isArray(movesPayload.mainline_node_ids)
+                ? movesPayload.mainline_node_ids
+                : (Array.isArray(created.mainline_node_ids) ? created.mainline_node_ids : null),
             };
           } else {
             throw new Error("Upload succeeded but no positions were returned.");
@@ -479,6 +515,7 @@ export default {
 
           this.pgnData = pgnData;
           this.currentMove = 0;
+          this.currentTreeNodeId = 0;
           await this.showPosition(0);
           console.log("PGN upload successful");
 
@@ -522,6 +559,7 @@ export default {
       // Clear previous analysis
       this.resetAnalysisState();
 
+      this.currentTreeNodeId = this.getMainlineNodeId(moveIndex);
       const position = this.pgnData.positions[moveIndex];
       this.fen = position.fen;
       await this.renderBoard();
@@ -530,6 +568,34 @@ export default {
     async selectMove(moveIndex) {
       this.currentMove = moveIndex;
       await this.showPosition(moveIndex);
+    },
+
+    getMainlineNodeId(moveIndex) {
+      const nodeIds = this.pgnData?.mainline_node_ids;
+      if (Array.isArray(nodeIds) && Number.isInteger(nodeIds[moveIndex])) {
+        return nodeIds[moveIndex];
+      }
+      return 0;
+    },
+
+    async selectTreeNode(nodeId) {
+      if (!this.pgnData?.variation_tree) return;
+
+      const node = this.treeNodeMap[nodeId];
+      if (!node?.fen) return;
+
+      this.stopLiveAnalysis();
+      this.resetAnalysisState();
+
+      this.currentTreeNodeId = nodeId;
+      if (Number.isInteger(node.mainline_index)) {
+        this.currentMove = node.mainline_index;
+      } else if (Number.isInteger(node.anchor_mainline_index)) {
+        this.currentMove = node.anchor_mainline_index;
+      }
+
+      this.fen = node.fen;
+      await this.renderBoard();
     },
 
     async nextMove() {
@@ -752,7 +818,7 @@ export default {
 <style scoped>
 .analyzer {
   text-align: center;
-  max-width: 1200px;
+  max-width: 1320px;
   width: 100%;
 }
 
@@ -764,8 +830,8 @@ input, button {
 
 .layout {
   display: grid;
-  grid-template-columns: minmax(420px, 520px) minmax(320px, 420px);
-  grid-template-rows: auto auto auto;
+  grid-template-columns: minmax(460px, 560px) minmax(370px, 485px);
+  grid-template-rows: auto auto;
   gap: 16px;
   align-items: start;
   justify-content: center;
@@ -784,41 +850,32 @@ input, button {
   min-width: 0;
 }
 
-.top-right {
-  grid-column: 2;
-  grid-row: 1;
-  min-width: 0;
+.board-area {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
 }
 
-.mid-right {
+.right-panel {
   grid-column: 2;
-  grid-row: 2;
-  min-width: 0;
-}
-
-.bottom-left {
-  grid-column: 1;
-  grid-row: 3;
+  grid-row: 1 / span 2;
   min-width: 0;
 }
 
 @media (max-width: 980px) {
   .layout {
     grid-template-columns: 1fr;
-    grid-template-rows: auto auto auto auto auto;
+    grid-template-rows: auto auto auto;
   }
   .top-left,
   .mid-left,
-  .top-right,
-  .mid-right,
-  .bottom-left {
+  .right-panel {
     grid-column: 1;
   }
   .top-left { grid-row: 1; }
   .mid-left { grid-row: 2; }
-  .top-right { grid-row: 3; }
-  .mid-right { grid-row: 4; }
-  .bottom-left { grid-row: 5; }
+  .right-panel { grid-row: 3; }
 }
 
 /* Live analysis card styling (kept here because LiveAnalysisPanel only defines inner scroll styles) */
