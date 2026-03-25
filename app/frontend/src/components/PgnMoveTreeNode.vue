@@ -1,11 +1,11 @@
 <template>
   <span class="move-sequence">
-    <span v-if="node.starting_comment" class="move-comment move-comment-start">
+    <span v-if="renderSelf && node.starting_comment" class="move-comment move-comment-start">
       { {{ node.starting_comment }} }
     </span>
 
     <button
-      v-if="node.san"
+      v-if="renderSelf && node.san"
       type="button"
       class="move-token"
       :class="{ active: currentNodeId === node.id, mainline: node.is_mainline }"
@@ -14,31 +14,46 @@
       {{ formattedLabel }}
     </button>
 
-    <span v-if="node.comment" class="move-comment">
+    <span v-if="renderSelf && node.comment" class="move-comment">
       { {{ node.comment }} }
     </span>
 
-    <template v-for="variation in sideVariations" :key="`variation-${variation.id}`">
-      <span class="variation-block">
-        <span class="variation-paren">(</span>
+    <template v-if="renderContinuation && mainlineChild">
+      <span class="continuation">
         <PgnMoveTreeNode
-          :node="variation"
+          :node="mainlineChild"
           :currentNodeId="currentNodeId"
-          :isBranchStart="true"
+          :isBranchStart="false"
+          :renderSelf="true"
+          :renderContinuation="false"
           @select-node="$emit('select-node', $event)"
         />
-        <span class="variation-paren">)</span>
+      </span>
+
+      <template v-for="variation in sideVariations" :key="`variation-${variation.id}`">
+        <span class="variation-block">
+          <span class="variation-paren">(</span>
+          <PgnMoveTreeNode
+            :node="variation"
+            :currentNodeId="currentNodeId"
+            :isBranchStart="true"
+            @select-node="$emit('select-node', $event)"
+          />
+          <span class="variation-paren">)</span>
+        </span>
+      </template>
+
+      <span class="continuation">
+        <PgnMoveTreeNode
+          :node="mainlineChild"
+          :currentNodeId="currentNodeId"
+          :isBranchStart="false"
+          :renderSelf="false"
+          :renderContinuation="true"
+          @select-node="$emit('select-node', $event)"
+        />
       </span>
     </template>
-
-    <span v-if="mainlineChild" class="continuation">
-      <PgnMoveTreeNode
-        :node="mainlineChild"
-        :currentNodeId="currentNodeId"
-        :isBranchStart="false"
-        @select-node="$emit('select-node', $event)"
-      />
-    </span>
   </span>
 </template>
 
@@ -49,6 +64,8 @@ export default {
     node: { type: Object, required: true },
     currentNodeId: { type: Number, default: 0 },
     isBranchStart: { type: Boolean, default: false },
+    renderSelf: { type: Boolean, default: true },
+    renderContinuation: { type: Boolean, default: true },
   },
   emits: ['select-node'],
   computed: {
@@ -142,4 +159,5 @@ export default {
   display: inline;
 }
 </style>
+
 

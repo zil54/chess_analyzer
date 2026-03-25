@@ -7,6 +7,8 @@
           :currentMove="currentMove"
           :currentPosition="currentPosition"
           :currentTreeNode="currentTreeNode"
+          :canGoPrev="canGoPrev"
+          :canGoNext="canGoNext"
           @go-first="firstMove"
           @go-prev="prevMove"
           @go-next="nextMove"
@@ -142,10 +144,12 @@ export default {
     // Set default starting position
     this.fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
     this.renderBoard();
+    window.addEventListener('keydown', this.handleKeyDown);
   },
 
   beforeUnmount() {
     this.stopLiveAnalysis();
+    window.removeEventListener('keydown', this.handleKeyDown);
   },
 
   computed: {
@@ -188,10 +192,72 @@ export default {
       }
 
       return map;
+    },
+    treeParentMap() {
+      const root = this.pgnData?.variation_tree;
+      if (!root) return {};
+
+      const map = { 0: null };
+      const stack = [root];
+      while (stack.length) {
+        const node = stack.pop();
+        if (!node || typeof node !== 'object') continue;
+
+        const variations = Array.isArray(node.variations) ? node.variations : [];
+        for (let index = variations.length - 1; index >= 0; index -= 1) {
+          const child = variations[index];
+          if (!child || !Number.isInteger(child.id)) continue;
+          map[child.id] = Number.isInteger(node.id) ? node.id : null;
+          stack.push(child);
+        }
+      }
+
+      return map;
+    },
+    canGoPrev() {
+      if (!this.pgnData) return false;
+      if (this.pgnData?.variation_tree) {
+        return this.currentTreeNodeId !== 0 && Number.isInteger(this.treeParentMap[this.currentTreeNodeId]);
+      }
+      return this.currentMove > 0;
+    },
+    canGoNext() {
+      if (!this.pgnData) return false;
+      if (this.pgnData?.variation_tree) {
+        return Boolean(this.getContinuationChild(this.currentTreeNode));
+      }
+      return this.currentMove < this.pgnData.total_moves;
     }
   },
 
   methods: {
+    getContinuationChild(node) {
+      const variations = Array.isArray(node?.variations) ? node.variations : [];
+      return variations.find((variation) => variation?.is_mainline) || variations[0] || null;
+    },
+
+    async showTreeNode(nodeId, preferredMoveIndex = null) {
+      if (!this.pgnData?.variation_tree) return;
+
+      const node = this.treeNodeMap[nodeId] || this.pgnData.variation_tree;
+      if (!node?.fen) return;
+
+      this.stopLiveAnalysis();
+      this.resetAnalysisState();
+
+      this.currentTreeNodeId = nodeId;
+      if (Number.isInteger(preferredMoveIndex)) {
+        this.currentMove = preferredMoveIndex;
+      } else if (Number.isInteger(node.mainline_index)) {
+        this.currentMove = node.mainline_index;
+      } else if (Number.isInteger(node.anchor_mainline_index)) {
+        this.currentMove = node.anchor_mainline_index;
+      }
+
+      this.fen = node.fen;
+      await this.renderBoard();
+    },
+
     convertToAlgebraic(uciMoves, fenString) {
       /**
        * Convert a string of UCI moves to algebraic notation with correct move numbers
@@ -554,9 +620,12 @@ export default {
     async showPosition(moveIndex) {
       if (!this.pgnData || moveIndex < 0 || moveIndex > this.pgnData.total_moves) return;
 
-      // Stop any ongoing analysis
+      if (this.pgnData?.variation_tree) {
+        await this.showTreeNode(this.getMainlineNodeId(moveIndex), moveIndex);
+        return;
+      }
+
       this.stopLiveAnalysis();
-      // Clear previous analysis
       this.resetAnalysisState();
 
       this.currentTreeNodeId = this.getMainlineNodeId(moveIndex);
@@ -579,26 +648,20 @@ export default {
     },
 
     async selectTreeNode(nodeId) {
-      if (!this.pgnData?.variation_tree) return;
-
-      const node = this.treeNodeMap[nodeId];
-      if (!node?.fen) return;
-
-      this.stopLiveAnalysis();
-      this.resetAnalysisState();
-
-      this.currentTreeNodeId = nodeId;
-      if (Number.isInteger(node.mainline_index)) {
-        this.currentMove = node.mainline_index;
-      } else if (Number.isInteger(node.anchor_mainline_index)) {
-        this.currentMove = node.anchor_mainline_index;
-      }
-
-      this.fen = node.fen;
-      await this.renderBoard();
+      await this.showTreeNode(nodeId);
     },
 
     async nextMove() {
+      if (!this.pgnData) return;
+
+      if (this.pgnData?.variation_tree) {
+        const nextNode = this.getContinuationChild(this.currentTreeNode);
+        if (nextNode?.id != null) {
+          await this.showTreeNode(nextNode.id);
+        }
+        return;
+      }
+
       if (this.currentMove < this.pgnData.total_moves) {
         this.currentMove++;
         await this.showPosition(this.currentMove);
@@ -606,6 +669,16 @@ export default {
     },
 
     async prevMove() {
+      if (!this.pgnData) return;
+
+      if (this.pgnData?.variation_tree) {
+        const parentNodeId = this.treeParentMap[this.currentTreeNodeId];
+        if (Number.isInteger(parentNodeId)) {
+          await this.showTreeNode(parentNodeId);
+        }
+        return;
+      }
+
       if (this.currentMove > 0) {
         this.currentMove--;
         await this.showPosition(this.currentMove);
@@ -626,6 +699,34 @@ export default {
       this.boardFlipped = !this.boardFlipped;
       if (this.fen) {
         this.renderBoard();
+      }
+    },
+
+    handleKeyDown(event) {
+      if (!this.pgnData || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) {
+        return;
+      }
+
+      const target = event.target;
+      if (target instanceof HTMLElement) {
+        const tagName = target.tagName;
+        if (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(tagName)) {
+          return;
+        }
+      }
+
+      if (event.key === 'ArrowLeft' && this.canGoPrev) {
+        event.preventDefault();
+        this.prevMove();
+      } else if (event.key === 'ArrowRight' && this.canGoNext) {
+        event.preventDefault();
+        this.nextMove();
+      } else if (event.key === 'Home' && this.currentMove !== 0) {
+        event.preventDefault();
+        this.firstMove();
+      } else if (event.key === 'End' && this.currentMove !== this.pgnData.total_moves) {
+        event.preventDefault();
+        this.lastMove();
       }
     },
 

@@ -14,11 +14,11 @@
     <div v-if="pgnData" class="pgn-controls">
       <div class="move-controls">
         <button @click="$emit('go-first')" :disabled="currentMove === 0">⏮ First</button>
-        <button @click="$emit('go-prev')" :disabled="currentMove === 0">◀ Prev</button>
-        <span>Main line {{ currentMove }} / {{ pgnData.total_moves }}</span>
+        <button @click="$emit('go-prev')" :disabled="!canGoPrev">◀ Prev</button>
+        <span>Ply {{ currentPly }} / {{ pgnData.total_moves }}</span>
         <button
           @click="$emit('go-next')"
-          :disabled="currentMove === pgnData.total_moves"
+          :disabled="!canGoNext"
         >
           Next ▶
         </button>
@@ -40,11 +40,22 @@ export default {
     pgnData: { type: Object, default: null },
     currentMove: { type: Number, required: true },
     currentPosition: { type: Object, default: null },
-    currentTreeNode: { type: Object, default: null }
+    currentTreeNode: { type: Object, default: null },
+    canGoPrev: { type: Boolean, default: false },
+    canGoNext: { type: Boolean, default: false }
   },
   computed: {
     isVariationView() {
       return Boolean(this.currentTreeNode?.san) && this.currentTreeNode?.is_mainline === false;
+    },
+    currentPly() {
+      if (Number.isInteger(this.currentTreeNode?.ply)) {
+        return this.currentTreeNode.ply;
+      }
+      if (Number.isInteger(this.currentPosition?.ply)) {
+        return this.currentPosition.ply;
+      }
+      return this.currentMove;
     }
   }
 };

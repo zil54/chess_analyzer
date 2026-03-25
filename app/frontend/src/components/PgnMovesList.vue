@@ -4,27 +4,12 @@
     <div class="moves-section-label">Full PGN (with variations)</div>
 
     <div v-if="hasVariationTree" class="tree-block">
-      <template v-if="rootMainlineNode">
-        <PgnMoveTreeNode
-          :node="rootMainlineNode"
-          :currentNodeId="currentNodeId"
-          :isBranchStart="true"
-          @select-node="$emit('select-tree-node', $event)"
-        />
-      </template>
-
-      <template v-for="variation in rootSideVariations" :key="`root-variation-${variation.id}`">
-        <span class="root-variation-inline">
-          <span class="variation-paren">(</span>
-          <PgnMoveTreeNode
-            :node="variation"
-            :currentNodeId="currentNodeId"
-            :isBranchStart="true"
-            @select-node="$emit('select-tree-node', $event)"
-          />
-          <span class="variation-paren">)</span>
-        </span>
-      </template>
+      <PgnMoveTreeNode
+        :node="variationTree"
+        :currentNodeId="currentNodeId"
+        :renderSelf="false"
+        @select-node="$emit('select-tree-node', $event)"
+      />
     </div>
 
     <div v-else class="movetext-block">{{ movetext }}</div>
@@ -57,17 +42,8 @@ export default {
     hasContent() {
       return this.hasVariationTree || Boolean(this.movetext);
     },
-    rootVariations() {
-      return Array.isArray(this.variationTree?.variations) ? this.variationTree.variations : [];
-    },
-    rootMainlineNode() {
-      return this.rootVariations.find((variation) => variation?.is_mainline) || this.rootVariations[0] || null;
-    },
-    rootSideVariations() {
-      return this.rootVariations.filter((variation) => variation && variation.id !== this.rootMainlineNode?.id);
-    },
     hasVariationTree() {
-      return this.rootVariations.length > 0;
+      return Array.isArray(this.variationTree?.variations) && this.variationTree.variations.length > 0;
     }
   }
 };
@@ -112,11 +88,6 @@ export default {
 .movetext-block {
   white-space: pre-wrap;
   word-break: break-word;
-}
-
-.root-variation-inline {
-  display: inline;
-  margin-left: 6px;
 }
 
 .variation-paren {
