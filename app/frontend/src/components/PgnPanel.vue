@@ -7,19 +7,18 @@
       <div v-if="currentPosition" class="current-move">
         <strong v-if="currentPosition.san">{{ currentPosition.san }}</strong>
         <span v-else>Starting position</span>
+        <span v-if="isVariationView" class="variation-badge">Viewing variation</span>
       </div>
     </div>
 
-    <div class="pgn-controls">
-      <button class="pgn-upload-btn" @click="$emit('upload-pgn')">Upload PGN File</button>
-
-      <div v-if="pgnData" class="move-controls">
+    <div v-if="pgnData" class="pgn-controls">
+      <div class="move-controls">
         <button @click="$emit('go-first')" :disabled="currentMove === 0">⏮ First</button>
-        <button @click="$emit('go-prev')" :disabled="currentMove === 0">◀ Prev</button>
-        <span>Move {{ currentMove }} / {{ pgnData.total_moves }}</span>
+        <button @click="$emit('go-prev')" :disabled="!canGoPrev">◀ Prev</button>
+        <span>Ply {{ currentPly }} / {{ pgnData.total_moves }}</span>
         <button
           @click="$emit('go-next')"
-          :disabled="currentMove === pgnData.total_moves"
+          :disabled="!canGoNext"
         >
           Next ▶
         </button>
@@ -40,7 +39,24 @@ export default {
   props: {
     pgnData: { type: Object, default: null },
     currentMove: { type: Number, required: true },
-    currentPosition: { type: Object, default: null }
+    currentPosition: { type: Object, default: null },
+    currentTreeNode: { type: Object, default: null },
+    canGoPrev: { type: Boolean, default: false },
+    canGoNext: { type: Boolean, default: false }
+  },
+  computed: {
+    isVariationView() {
+      return Boolean(this.currentTreeNode?.san) && this.currentTreeNode?.is_mainline === false;
+    },
+    currentPly() {
+      if (Number.isInteger(this.currentTreeNode?.ply)) {
+        return this.currentTreeNode.ply;
+      }
+      if (Number.isInteger(this.currentPosition?.ply)) {
+        return this.currentPosition.ply;
+      }
+      return this.currentMove;
+    }
   }
 };
 </script>
@@ -62,22 +78,8 @@ export default {
   margin-top: 10px;
 }
 
-.pgn-upload-btn {
-  padding: 8px 16px;
-  background-color: #4CAF50;
-  color: white;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 14px;
-  margin: 5px 0;
-}
-.pgn-upload-btn:hover {
-  background-color: #45a049;
-}
-
 .move-controls {
-  margin: 10px 0 0;
+  margin: 0;
   display: flex;
   justify-content: center;
   align-items: center;
@@ -89,5 +91,16 @@ export default {
   margin-top: 6px;
   font-size: 16px;
   color: #2c3e50;
+}
+
+.variation-badge {
+  display: inline-block;
+  margin-left: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #fff4e5;
+  color: #9a6700;
+  font-size: 12px;
+  font-weight: 600;
 }
 </style>

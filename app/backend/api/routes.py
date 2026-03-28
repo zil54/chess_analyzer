@@ -9,6 +9,7 @@ try:
         create_game,
         insert_moves,
         get_moves,
+        get_game_raw_pgn,
         get_eval,
         DB_ENABLED,
     )
@@ -24,41 +25,169 @@ except Exception:  # pragma: no cover
 
 router = APIRouter()
 
-@router.post("/analyze_pgn")
-async def analyze_pgn(request: Request):
-    """
-    Parse a PGN and return all positions.
-    If DB_ENABLED, also persist the game and moves to the database.
-    Accepts either JSON with {"pgn": "..."} or multipart file upload
-    """
+
+async def _read_pgn_from_request(request: Request) -> str:
+    """Read PGN text from JSON or multipart form-data."""
     try:
-        # Try JSON first
         data = await request.json()
-        pgn_str = data.get("pgn", "")
+        pgn_str = (data.get("pgn") or "").strip()
     except Exception:
-        # Try form data with file upload
         try:
             form = await request.form()
-            if "file" in form:
-                file = form["file"]
-                pgn_text = await file.read()
-                pgn_str = pgn_text.decode('utf-8')
-            elif "pgn" in form:
-                pgn_str = form["pgn"]
+            file = form.get("file")
+            if file is None:
+                pgn_str = (form.get("pgn") or "").strip()
             else:
-                raise HTTPException(status_code=400, detail="No PGN data provided")
+                try:
+                    pgn_bytes = await file.read()
+                except Exception:
+                    pgn_bytes = file.file.read() if getattr(file, "file", None) else b""
+
+                if not pgn_bytes:
+                    raise HTTPException(status_code=400, detail="Uploaded PGN file is empty")
+
+                try:
+                    pgn_str = pgn_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    pgn_str = pgn_bytes.decode("latin-1")
+
+                pgn_str = pgn_str.strip()
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Failed to read PGN: {str(e)}")
 
     if not pgn_str:
         raise HTTPException(status_code=400, detail="PGN data is required")
 
-    try:
-        game = chess.pgn.read_game(io.StringIO(pgn_str))
-        if not game:
-            raise ValueError("No valid game found in PGN")
+    return pgn_str
 
-        # Extract game metadata
+
+def _read_pgn_game(pgn_str: str) -> chess.pgn.Game:
+    game = chess.pgn.read_game(io.StringIO(pgn_str))
+    if not game:
+        raise ValueError("No valid game found in PGN")
+
+    game_errors = getattr(game, "errors", None) or []
+    if game_errors:
+        raise ValueError(str(game_errors[0]))
+
+    return game
+
+
+def _export_pgn_movetext(game: chess.pgn.Game) -> str:
+    exporter = chess.pgn.StringExporter(
+        headers=False,
+        comments=True,
+        variations=True,
+        columns=None,
+    )
+    return game.accept(exporter).strip()
+
+
+def _extract_pgn_movetext(pgn_str: str) -> str:
+    try:
+        return _export_pgn_movetext(_read_pgn_game(pgn_str))
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(str(e))
+
+
+def _build_variation_tree(game: chess.pgn.Game) -> tuple[dict, list[int]]:
+    board = game.board()
+    next_node_id = 1
+    mainline_node_ids = [0]
+
+    root = {
+        "id": 0,
+        "ply": 0,
+        "move_number": 0,
+        "color": None,
+        "move": None,
+        "san": None,
+        "fen": board.fen(),
+        "comment": (game.comment or None) if getattr(game, "comment", None) else None,
+        "starting_comment": None,
+        "is_mainline": True,
+        "mainline_index": 0,
+        "anchor_mainline_index": 0,
+        "variations": [],
+    }
+
+    def build_children(
+        pgn_node: chess.pgn.GameNode,
+        current_board: chess.Board,
+        parent_ply: int,
+        parent_mainline_index: int,
+        follows_mainline: bool,
+    ) -> list[dict]:
+        nonlocal next_node_id
+
+        children: list[dict] = []
+        for variation_index, child in enumerate(pgn_node.variations):
+            move = child.move
+            san = current_board.san(move)
+            move_number = current_board.fullmove_number
+            color = "w" if current_board.turn == chess.WHITE else "b"
+
+            child_board = current_board.copy(stack=False)
+            child_board.push(move)
+
+            is_mainline = follows_mainline and variation_index == 0
+            node_id = next_node_id
+            next_node_id += 1
+
+            mainline_index = (parent_mainline_index + 1) if is_mainline else None
+            anchor_mainline_index = parent_mainline_index
+            if is_mainline and mainline_index is not None:
+                anchor_mainline_index = mainline_index
+                mainline_node_ids.append(node_id)
+
+            node = {
+                "id": node_id,
+                "ply": parent_ply + 1,
+                "move_number": move_number,
+                "color": color,
+                "move": move.uci(),
+                "san": san,
+                "fen": child_board.fen(),
+                "comment": (child.comment or None) if getattr(child, "comment", None) else None,
+                "starting_comment": (getattr(child, "starting_comment", None) or None),
+                "is_mainline": is_mainline,
+                "mainline_index": mainline_index,
+                "anchor_mainline_index": anchor_mainline_index,
+                "variations": [],
+            }
+            node["variations"] = build_children(
+                child,
+                child_board,
+                node["ply"],
+                mainline_index if mainline_index is not None else anchor_mainline_index,
+                is_mainline,
+            )
+            children.append(node)
+
+        return children
+
+    root["variations"] = build_children(game, board, 0, 0, True)
+    return root, mainline_node_ids
+
+
+def _extract_pgn_tree(pgn_str: str) -> tuple[dict, list[int]]:
+    try:
+        return _build_variation_tree(_read_pgn_game(pgn_str))
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(str(e))
+
+
+def _parse_pgn_payload(pgn_str: str) -> tuple[dict, list[dict], list[dict], int, str, dict, list[int]]:
+    """Parse PGN into headers, UI positions, DB move rows, ply count, movetext, and variation tree."""
+    try:
+        game = _read_pgn_game(pgn_str)
+
         headers = {
             "event": game.headers.get("Event", "Unknown"),
             "white": game.headers.get("White", "Unknown"),
@@ -69,27 +198,20 @@ async def analyze_pgn(request: Request):
         }
 
         board = game.board()
-        positions = []
-        move_rows = []
-
-        # Add starting position
-        positions.append({
+        positions = [{
             "move_number": 0,
             "fen": board.fen(),
             "move": None,
-            "san": None
-        })
-
-        # Store starting position as ply 0
-        move_rows.append({
+            "san": None,
+        }]
+        move_rows = [{
             "ply": 0,
             "san": "START",
             "fen": board.fen(),
             "comment": None,
             "cp_tag": False,
-        })
+        }]
 
-        # Process all moves
         ply = 0
         node = game
         for move in game.mainline_moves():
@@ -97,7 +219,6 @@ async def analyze_pgn(request: Request):
             san = board.san(move)
             board.push(move)
 
-            # Try to capture comments
             try:
                 node = node.variation(move)
                 comment = (node.comment or None) if node else None
@@ -108,9 +229,8 @@ async def analyze_pgn(request: Request):
                 "move_number": board.fullmove_number,
                 "fen": board.fen(),
                 "move": move.uci(),
-                "san": san
+                "san": san,
             })
-
             move_rows.append({
                 "ply": ply,
                 "san": san,
@@ -118,6 +238,29 @@ async def analyze_pgn(request: Request):
                 "comment": comment,
                 "cp_tag": False,
             })
+
+        if ply == 0:
+            raise ValueError("PGN must contain at least one legal move")
+
+        variation_tree, mainline_node_ids = _build_variation_tree(game)
+        return headers, positions, move_rows, ply, _export_pgn_movetext(game), variation_tree, mainline_node_ids
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(str(e))
+
+
+@router.post("/analyze_pgn")
+async def analyze_pgn(request: Request):
+    """
+    Parse a PGN and return all positions.
+    If DB_ENABLED, also persist the game and moves to the database.
+    Accepts either JSON with {"pgn": "..."} or multipart file upload
+    """
+    pgn_str = await _read_pgn_from_request(request)
+
+    try:
+        headers, positions, move_rows, ply, movetext, variation_tree, mainline_node_ids = _parse_pgn_payload(pgn_str)
 
         # Persist to DB if enabled
         game_id = None
@@ -138,7 +281,10 @@ async def analyze_pgn(request: Request):
             "game_id": game_id,
             "headers": headers,
             "total_moves": len(positions) - 1,
-            "positions": positions
+            "positions": positions,
+            "movetext": movetext,
+            "variation_tree": variation_tree,
+            "mainline_node_ids": mainline_node_ids,
         }
 
     except ValueError as e:
@@ -167,103 +313,16 @@ async def create_game_from_pgn(request: Request):
     """Create a game from uploaded PGN, persist all positions (FENs) into DB.
 
     Accepts multipart/form-data with a `file` field (PGN), or JSON {"pgn": "..."}.
-    Returns: { id, headers, total_moves }
+    Returns: { id, headers, total_moves } when DB enabled, or { id, headers, total_moves, positions } when DB disabled
     """
     logger.info("=== POST /games called ===")
     logger.info(f"DB_ENABLED: {DB_ENABLED}")
 
-    if not DB_ENABLED:
-        logger.error("DB not enabled, returning 503")
-        raise HTTPException(status_code=503, detail="Database not configured. Set DATABASE_URL in .env file.")
-
-    # Read PGN (file or json)
-    pgn_str = ""
-    try:
-        data = await request.json()
-        pgn_str = (data.get("pgn") or "").strip()
-    except Exception:
-        # Multipart/form-data: Starlette returns an UploadFile instance
-        try:
-            form = await request.form()
-            file = form.get("file")
-            if file is None:
-                pgn_str = (form.get("pgn") or "").strip()
-            else:
-                # Starlette UploadFile has async read(); other objects might expose .file
-                try:
-                    pgn_bytes = await file.read()
-                except Exception:
-                    pgn_bytes = file.file.read() if getattr(file, "file", None) else b""
-
-                if not pgn_bytes:
-                    raise HTTPException(status_code=400, detail="Uploaded PGN file is empty")
-
-                try:
-                    pgn_str = pgn_bytes.decode("utf-8")
-                except UnicodeDecodeError:
-                    # Some PGNs can be latin-1; keep it permissive.
-                    pgn_str = pgn_bytes.decode("latin-1")
-
-                pgn_str = pgn_str.strip()
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Failed to read PGN: {str(e)}")
-
-    if not pgn_str:
-        raise HTTPException(status_code=400, detail="PGN data is required")
-
+    pgn_str = await _read_pgn_from_request(request)
     logger.info(f"Read PGN: {len(pgn_str)} bytes")
 
-    # Parse + convert to move list
     try:
-        game = chess.pgn.read_game(io.StringIO(pgn_str))
-        if not game:
-            raise ValueError("No valid game found in PGN")
-
-        headers = {
-            "event": game.headers.get("Event", "Unknown"),
-            "site": game.headers.get("Site", "Unknown"),
-            "white": game.headers.get("White", "Unknown"),
-            "black": game.headers.get("Black", "Unknown"),
-            "date": game.headers.get("Date", "Unknown"),
-            "result": game.headers.get("Result", "*")
-        }
-
-        board = game.board()
-        move_rows = []
-
-        # Store starting position as ply 0 (san required by schema; use a stable placeholder)
-        move_rows.append({
-            "ply": 0,
-            "san": "START",
-            "fen": board.fen(),
-            "comment": None,
-            "cp_tag": False,
-        })
-
-        ply = 0
-        node = game
-        for mv in game.mainline_moves():
-            ply += 1
-            san = board.san(mv)
-            board.push(mv)
-
-            # Try to capture comments if present (PGN node comments attach to the node *after* the move)
-            try:
-                node = node.variation(mv)
-                comment = (node.comment or None) if node else None
-            except Exception:
-                comment = None
-
-            move_rows.append({
-                "ply": ply,
-                "san": san,
-                "fen": board.fen(),
-                "comment": comment,
-                "cp_tag": False,
-            })
-
+        headers, positions, move_rows, ply, movetext, variation_tree, mainline_node_ids = _parse_pgn_payload(pgn_str)
         logger.info(f"Parsed {ply} plies from PGN")
 
     except ValueError as e:
@@ -273,35 +332,53 @@ async def create_game_from_pgn(request: Request):
         logger.error(f"Error processing PGN: {e}")
         raise HTTPException(status_code=500, detail=f"Error processing PGN: {str(e)}")
 
-    try:
-        logger.info(f"Calling create_game...")
-        game_id = await create_game(pgn_str, headers)
-        logger.info(f"Game created with ID: {game_id}")
+    if DB_ENABLED:
+        # Persist to DB
+        try:
+            logger.info(f"Calling create_game...")
+            game_id = await create_game(pgn_str, headers)
+            logger.info(f"Game created with ID: {game_id}")
 
-        logger.info(f"Calling insert_moves with {len(move_rows)} rows...")
-        await insert_moves(game_id, move_rows)
-        logger.info(f"Moves inserted successfully")
+            logger.info(f"Calling insert_moves with {len(move_rows)} rows...")
+            await insert_moves(game_id, move_rows)
+            logger.info(f"Moves inserted successfully")
 
-    except Exception as e:
-        logger.error(f"DB error during insert: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"DB error: {str(e)}")
+        except Exception as e:
+            logger.error(f"DB error during insert: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"DB error: {str(e)}")
 
-    logger.info(
-        "Stored game_id=%s to DB (white=%s black=%s result=%s) with %s plies",
-        game_id,
-        headers.get("white"),
-        headers.get("black"),
-        headers.get("result"),
-        ply,
-    )
+        logger.info(
+            "Stored game_id=%s to DB (white=%s black=%s result=%s) with %s plies",
+            game_id,
+            headers.get("white"),
+            headers.get("black"),
+            headers.get("result"),
+            ply,
+        )
 
-    return {
-        "success": True,
-        "id": game_id,
-        "headers": headers,
-        "total_moves": ply,
-    }
-
+        return {
+            "success": True,
+            "id": game_id,
+            "headers": headers,
+            "total_moves": ply,
+            "positions": positions,
+            "movetext": movetext,
+            "variation_tree": variation_tree,
+            "mainline_node_ids": mainline_node_ids,
+        }
+    else:
+        # No DB: return positions directly
+        logger.info("DB not enabled, returning parsed positions without persistence")
+        return {
+            "success": True,
+            "id": None,
+            "headers": headers,
+            "total_moves": len(positions) - 1,
+            "positions": positions,
+            "movetext": movetext,
+            "variation_tree": variation_tree,
+            "mainline_node_ids": mainline_node_ids,
+        }
 
 @router.get("/games")
 async def list_games():
@@ -369,11 +446,25 @@ async def fetch_game_moves(game_id: int):
         for r in rows
     ]
 
+    movetext = None
+    variation_tree = None
+    mainline_node_ids = None
+    raw_pgn = await get_game_raw_pgn(game_id)
+    if raw_pgn:
+        try:
+            movetext = _extract_pgn_movetext(raw_pgn)
+            variation_tree, mainline_node_ids = _extract_pgn_tree(raw_pgn)
+        except ValueError as e:
+            logger.warning("Unable to export PGN movetext for game_id=%s: %s", game_id, e)
+
     return {
         "success": True,
         "game_id": game_id,
         "total_moves": max(0, len(positions) - 1),
         "positions": positions,
+        "movetext": movetext,
+        "variation_tree": variation_tree,
+        "mainline_node_ids": mainline_node_ids,
     }
 
 
@@ -399,3 +490,178 @@ async def health_db():
         return {"ok": bool(ok), "db_enabled": True}
     except Exception as e:
         return {"ok": False, "db_enabled": True, "detail": str(e)}
+
+@router.post("/analyze")
+async def analyze_position(request: Request):
+    """
+    Analyze a chess position using Stockfish with caching.
+
+    Cache-then-compute pattern:
+    1. Check if evaluation exists in DB (cache hit)
+    2. If not found, run Stockfish (cache miss)
+    3. Store result in DB
+    4. Return evaluation
+
+    Request body (JSON):
+    {
+        "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        "depth": 20,              // optional, default 20
+        "time_limit": 0.5,        // optional, default 0.5 seconds
+        "force_recompute": false  // optional, skip cache if true
+    }
+
+    Response:
+    {
+        "fen": "...",
+        "best_move": "e2e4",
+        "score_cp": 20,           // centipawn score (null if mate)
+        "score_mate": null,       // mate in N (null if not mate)
+        "depth": 20,
+        "pv": "e2e4 e7e5 g1f3",
+        "cached": true,
+        "created_at": "2026-02-21T12:00:00"  // only if cached
+    }
+    """
+    try:
+        from app.backend.services.analyzer_service import analyze_position
+
+        data = await request.json()
+        fen = data.get("fen", "").strip()
+        depth = int(data.get("depth", 20))
+        time_limit = float(data.get("time_limit", 0.5))
+        force_recompute = bool(data.get("force_recompute", False))
+
+        if not fen:
+            raise HTTPException(status_code=400, detail="FEN is required")
+
+        result = await analyze_position(
+            fen=fen,
+            depth=depth,
+            time_limit=time_limit,
+            force_recompute=force_recompute
+        )
+
+        if "error" in result:
+            logger.error(f"Analysis error: {result['error']}")
+            raise HTTPException(status_code=400, detail=result["error"])
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in /analyze endpoint: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+
+@router.post("/games/{game_id}/analyze")
+async def batch_analyze_game(game_id: int, request: Request):
+    """
+    Batch analyze all positions (FENs) from an uploaded game.
+
+    This endpoint:
+    1. Fetches all moves from the game
+    2. Analyzes each FEN with Stockfish
+    3. Stores evaluations in the evals table
+    4. Returns progress/results
+
+    Query parameters (optional):
+    - depth: Search depth (default 20)
+    - time_limit: Time per position in seconds (default 0.5)
+
+    Request body (optional):
+    {
+        "depth": 20,
+        "time_limit": 0.5
+    }
+
+    Response:
+    {
+        "success": true,
+        "game_id": 1,
+        "total_positions": 50,
+        "analyzed": 45,
+        "cached": 5,
+        "errors": 0,
+        "total_time_seconds": 12.5,
+        "message": "Analyzed 45 new positions, 5 from cache"
+    }
+    """
+    if not DB_ENABLED:
+        raise HTTPException(status_code=503, detail="Database not configured.")
+
+    try:
+        from app.backend.services.analyzer_service import analyze_position
+
+        # Get parameters from body or query
+        try:
+            body = await request.json()
+            depth = int(body.get("depth", 20))
+            time_limit = float(body.get("time_limit", 0.5))
+        except Exception:
+            # Try query params if no body
+            depth = 20
+            time_limit = 0.5
+
+        # Fetch all moves for this game
+        rows = await get_moves(game_id)
+        if not rows:
+            raise HTTPException(status_code=404, detail=f"Game {game_id} not found or has no moves")
+
+        logger.info(f"Batch analyzing {len(rows)} positions for game {game_id}")
+
+        analyzed_count = 0
+        cached_count = 0
+        error_count = 0
+        import time
+        start_time = time.time()
+
+        # Analyze each position
+        for row in rows:
+            fen = row.get("fen")
+            if not fen:
+                continue
+
+            try:
+                result = await analyze_position(
+                    fen=fen,
+                    depth=depth,
+                    time_limit=time_limit,
+                    force_recompute=False  # Use cache if available
+                )
+
+                if "error" not in result:
+                    if result.get("cached"):
+                        cached_count += 1
+                    else:
+                        analyzed_count += 1
+                    logger.debug(f"Analyzed FEN: {fen[:30]}...")
+                else:
+                    error_count += 1
+                    logger.warning(f"Error analyzing FEN: {result.get('error')}")
+
+            except Exception as e:
+                error_count += 1
+                logger.error(f"Exception analyzing FEN: {e}")
+
+        elapsed = time.time() - start_time
+
+        logger.info(
+            f"Batch analysis complete: analyzed={analyzed_count}, cached={cached_count}, errors={error_count}, time={elapsed:.2f}s"
+        )
+
+        return {
+            "success": True,
+            "game_id": game_id,
+            "total_positions": len(rows),
+            "analyzed": analyzed_count,
+            "cached": cached_count,
+            "errors": error_count,
+            "total_time_seconds": round(elapsed, 2),
+            "message": f"Analyzed {analyzed_count} new positions, {cached_count} from cache"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in batch analysis: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Batch analysis failed: {str(e)}")

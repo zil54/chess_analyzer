@@ -44,3 +44,45 @@ async def test_create_game_endpoint_writes_games_and_moves() -> None:
             await cur.execute("SELECT COUNT(*) AS n FROM public.moves WHERE game_id=%s", (gid,))
             n = (await cur.fetchone())["n"]
             assert n == 5
+
+
+def test_fetch_game_moves_returns_movetext_with_variations_from_stored_pgn() -> None:
+    from app.backend.main import app
+    from fastapi.testclient import TestClient
+
+    pgn = """[Event \"Variation Test\"]
+[Site \"Local\"]
+[Date \"2026.02.21\"]
+[Round \"-\"]
+[White \"WhitePlayer\"]
+[Black \"BlackPlayer\"]
+[Result \"1-0\"]
+
+1. e4 (1. d4 d5 2. c4) e5 2. Nf3 Nc6 1-0
+"""
+
+    with TestClient(app) as client:
+        create_resp = client.post(
+            "/games",
+            files={"file": ("variation-game.pgn", pgn.encode("utf-8"), "application/x-chess-pgn")},
+        )
+        assert create_resp.status_code == 200, create_resp.text
+        game_id = create_resp.json()["id"]
+
+        moves_resp = client.get(f"/games/{game_id}/moves")
+
+    assert moves_resp.status_code == 200, moves_resp.text
+    payload = moves_resp.json()
+    assert payload["movetext"].endswith("1-0")
+    assert "e4" in payload["movetext"]
+    assert "d4" in payload["movetext"]
+    assert "(" in payload["movetext"]
+    assert ")" in payload["movetext"]
+    assert payload["variation_tree"]["id"] == 0
+    assert payload["mainline_node_ids"] == [0, 1, 2, 3, 4]
+
+    side_variation = next(node for node in payload["variation_tree"]["variations"] if node["san"] == "d4")
+    assert side_variation["is_mainline"] is False
+    assert side_variation["anchor_mainline_index"] == 0
+
+

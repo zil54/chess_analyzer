@@ -1,0 +1,40 @@
+================================================================================
+ANALYSIS_LINES TABLE CHECK
+================================================================================
+
+[OK] Connected to database
+
+analysis_lines table: 132 rows
+
+[YES] TABLE IS POPULATED!
+
+Depth distribution:
+  Depth 38: 3 lines
+  Depth 37: 3 lines
+  Depth 36: 3 lines
+  Depth 35: 3 lines
+  Depth 34: 4 lines
+  Depth 33: 6 lines
+  Depth 32: 6 lines
+  Depth 31: 6 lines
+  Depth 30: 8 lines
+  Depth 29: 6 lines
+  Depth 28: 6 lines
+  Depth 27: 6 lines
+  Depth 26: 6 lines
+  Depth 25: 6 lines
+  Depth 24: 6 lines
+  Depth 23: 6 lines
+  Depth 22: 6 lines
+  Depth 21: 6 lines
+  Depth 20: 6 lines
+  Depth 19: 6 lines
+  Depth 18: 6 lines
+  Depth 17: 6 lines
+  Depth 16: 6 lines
+  Depth 15: 6 lines
+
+Sample data:
+  Depth 38, Line 1: 1 (-125cp)
+  Depth 38, Line 2: 2 (-143cp)
+  Depth 38, Line 3: 3 (-143cp)

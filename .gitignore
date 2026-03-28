@@ -11,9 +11,22 @@ venv/
 node_modules/
 
 # Build outputs
-/dist/
+dist/
+**/dist/
+app/frontend/dist/
+
+# Large binaries
+
 
 # OS
 .DS_Store
 Thumbs.db
 
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Logs
+logs/
+*.log

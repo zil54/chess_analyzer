@@ -1,7 +1,7 @@
 # Can the App Run Without a Database?
 
 ## Short Answer
-**Yes, partially.** The core chess analysis features work without a database, but PGN upload persistence won't work.
+**Yes.** The app can run without PostgreSQL for live analysis, board rendering, and PGN exploration. What you lose is persistence and DB-backed cached analysis.
 
 ---
 
@@ -9,102 +9,111 @@
 
 ### ✅ Core Features
 1. **Board SVG Rendering** (`POST /svg`)
-   - Send a FEN string → get SVG board visualization
+   - Send a FEN string → get an SVG board
    - No database required
 
 2. **Live Stockfish Analysis** (`WebSocket /ws/analyze`)
-   - Real-time engine analysis via WebSocket
-   - Streams multi-PV evaluation lines
-   - No database required
+   - Streams analysis directly from Stockfish
+   - No DB lookup is performed
+   - First visible depth can be very low (including depth 1)
+   - The UI trails the worker by the configured display lag
 
 3. **Analysis Display**
-   - Shows depth, evaluation, and principal variation lines
-   - All computation done by Stockfish
-   - No database required
+   - Shows depth, evaluation, and up to 3 PV lines
+   - Uses the current frontend defaults:
+     - display target depth `10`
+     - worker target depth `70`
+     - display lag depth `2`
+   - No persistence required
 
-4. **Board Navigation**
-   - Flip board orientation
-   - View different positions (if manually entered)
-   - No database required
+4. **PGN Upload and Move Navigation**
+   - PGN files can still be parsed and loaded into the UI
+   - Move-by-move board navigation still works
+   - Without DB, uploaded games are not persisted
 
 5. **Frontend UI**
-   - Full Vue.js interface loads and functions
-   - All visualization components work
-   - No database required
+   - Full Vue.js interface loads and functions without DB
+
+---
+
+## What Changes Without a Database
+
+### No Cache Layer
+Without DB:
+
+- there is no stored evaluation lookup
+- there is no cached snapshot to show first
+- every live-analysis request starts from direct engine output
+- results are not reused between sessions
+
+### No Persistence
+Without DB:
+
+- games are not stored permanently
+- engine analysis is not written to `evals`
+- principal-variation snapshots are not written to `analysis_lines`
+- refreshing or restarting loses uploaded PGNs and live-analysis cache
+
+---
+
+## Current Live Analysis Behavior Without DB
+
+When `DB_ENABLED = False`, the backend uses the direct-engine WebSocket path.
+
+### Request Model
+The frontend sends a request like:
+
+```json
+{
+  "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+  "display_target_depth": 10,
+  "worker_target_depth": 70,
+  "display_lag_depth": 2
+}
+```
+
+### Runtime Behavior
+- Stockfish starts immediately
+- the UI can begin showing shallow depths right away
+- the displayed depth trails the worker by about 2 plies
+- analysis stops when the worker reaches depth 70 (unless you override the defaults)
+
+### Representative UI Text
+You may see status text like:
+
+- `Live analysis · showing depth 6/10 · worker 8/70`
+- `Analysis complete · showing depth 70 (requested 10) · worker 70/70`
 
 ---
 
 ## What DOES NOT Work Without a Database
 
-### ❌ Database-Dependent Features
-These endpoints return `503 Service Unavailable` when `DB_ENABLED = False`:
+### ❌ DB-Backed Features
+These features require PostgreSQL:
 
-| Endpoint | Feature | Why Fails |
-|----------|---------|-----------|
-| `POST /analyze_pgn` | PGN File Upload | Can parse PGN but won't persist |
-| `POST /games` | Store PGN to DB | Explicitly requires DB |
-| `GET /games` | List all games | Needs to query database |
-| `GET /games/{id}/moves` | Retrieve moves for a game | Needs database query |
-| `GET /evals` | Fetch cached evaluations | Requires database |
-| `GET /health/db` | DB health check | Returns DB disabled status |
+- persistent game library/history
+- reloading previously uploaded games from storage
+- cached live-analysis snapshots from `evals` / `analysis_lines`
+- DB health checks that report a live PostgreSQL connection
 
----
+### Endpoints That Depend on Stored DB Data
+These routes are only useful with a configured database:
 
-## What Happens Without DATABASE_URL
-
-When `DATABASE_URL` is not set in `.env`:
-
-### Application Startup
-```
-[WARNING] Database is NOT configured. 
-Session/PGN features will be unavailable. 
-Set DATABASE_URL in .env to enable.
-```
-
-### User Attempts to Upload PGN
-- User clicks "Upload PGN" button
-- File is sent to `/analyze_pgn`
-- Endpoint parses the PGN ✅
-- **Then tries to save to DB ❌**
-- User sees error: PGN is analyzed but not saved
-- Database is skipped but upload incomplete
-
----
-
-## Endpoints That DON'T Require Database
-
-### 1. GET / (Frontend)
-- Serves the Vue.js application
-- Works perfectly without DB
-
-### 2. POST /svg
-```json
-Request:  { "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" }
-Response: <svg>...</svg>
-```
-Works without DB ✅
-
-### 3. WebSocket /ws/analyze
-```
-Client: sends FEN string
-Server: streams Stockfish analysis lines
-```
-Works without DB ✅
-
-### 4. POST /analyze (if it exists)
-One-shot analysis endpoint
-Works without DB ✅
+| Endpoint | Why it depends on DB |
+|----------|----------------------|
+| `GET /games` | Reads persisted games |
+| `GET /games/{id}/moves` | Reads persisted move history |
+| `GET /evals` | Reads persisted cached evaluations |
+| `GET /health/db` | Reports database connectivity |
 
 ---
 
 ## How to Run Without Database
 
-### 1. Don't set `DATABASE_URL` in `.env`
-```env
-# Leave this commented or unset:
-# DATABASE_URL=postgresql://user:pass@localhost/chess_analyzer
+### 1. Leave DB settings unset
 
-# Or use separate vars without complete credentials:
+```env
+# DATABASE_URL=postgresql://user:pass@localhost:5432/chess_analyzer
 DB_HOST=
 DB_PORT=
 DB_NAME=
@@ -112,62 +121,48 @@ DB_USER=
 DB_PASSWORD=
 ```
 
-### 2. Start the app normally
+### 2. Start the backend
+
 ```bash
 cd app/backend
 python main.py
 ```
 
-### 3. You can now:
-- ✅ Open the frontend UI
-- ✅ Render chess boards from FEN strings
-- ✅ Analyze positions with Stockfish in real-time
-- ✅ View evaluation lines and depth
+### 3. Optional: run the frontend dev server
 
-### 4. You CANNOT:
-- ❌ Upload PGN files (they won't persist)
-- ❌ Retrieve previously uploaded games
-- ❌ Store game analysis sessions
-- ❌ Access cached evaluations
-
----
-
-## Current Implementation Details
-
-### DB_ENABLED Flag
-In `app/backend/db/db.py`:
-```python
-DATABASE_URL = os.getenv("DATABASE_URL") or _build_database_url_from_parts()
-DB_ENABLED = bool(DATABASE_URL)
+```bash
+cd app/frontend
+npm run dev
 ```
 
-### Graceful Degradation
-The app checks `DB_ENABLED` before each database operation:
-- If `False` → returns 503 "Database not configured"
-- If `True` → attempts database operations
+### 4. You can now
+- ✅ Open the frontend UI
+- ✅ Render boards from FEN strings
+- ✅ Upload a PGN for local exploration
+- ✅ Run live Stockfish analysis
+- ✅ Navigate through moves in the UI
 
-### No Hard Dependency
-The application:
-- Does NOT crash if DATABASE_URL is missing
-- Does NOT require database to start up
-- Logs warnings but continues running
-- Gracefully handles DB absence per endpoint
+### 5. You cannot persist
+- ❌ uploaded games
+- ❌ cached evaluations
+- ❌ analysis lines
+- ❌ game history across restarts
 
 ---
 
-## Ideal Use Cases
+## How This Differs From DB Mode
 
-### Without Database ✅
-- **Local analysis tool**: Analyze positions from FEN or textbox input
-- **Engine testing**: Test Stockfish against different positions
-- **Board visualization**: Convert PEN to SVG for web display
-- **Real-time analysis**: Stream live engine evaluations
+### Without DB
+- always starts from direct engine output
+- no cached snapshot is shown first
+- no saved analysis is reused
+- no results are persisted
 
-### With Database ✅
-- **Game library**: Store and retrieve uploaded PGN files
-- **Analysis sessions**: Track multiple game analyses
-- **Evaluation caching**: Store engine evaluations for quick lookup
-- **Game history**: Maintain game library over time
+### With DB
+- can show a cached snapshot immediately
+- can prefer richer multi-line cached snapshots over deeper one-line snapshots
+- can deepen cached positions further in the background
+- persists analysis data for later reuse
 
 ---
 
@@ -178,12 +173,12 @@ The application:
 | Frontend UI | ✅ Works | ✅ Works |
 | Board Rendering | ✅ Works | ✅ Works |
 | Live Analysis | ✅ Works | ✅ Works |
-| FEN Input | ✅ Works | ✅ Works |
 | PGN Parsing | ✅ Works | ✅ Works |
+| PGN Move Navigation | ✅ Works | ✅ Works |
+| Cached Snapshots | ❌ No | ✅ Yes |
 | PGN Persistence | ❌ No | ✅ Yes |
 | Game Library | ❌ No | ✅ Yes |
-| Session Tracking | ❌ No | ✅ Yes |
-| Eval Caching | ❌ No | ✅ Yes |
+| Evaluation Cache | ❌ No | ✅ Yes |
 
 ---
 
@@ -191,17 +186,15 @@ The application:
 
 ### Minimal Setup (No DB)
 ```bash
-# Just need Stockfish
-# No DATABASE_URL required
+# Stockfish only
 python main.py
 ```
 
 ### Full Setup (With DB)
 ```bash
-# Set DATABASE_URL in .env
-# Stockfish + PostgreSQL required
+# Stockfish + PostgreSQL
+# Set DATABASE_URL or DB_* settings in .env
 python main.py
 ```
 
-Both configurations work and fail gracefully on unavailable resources.
-
+Both configurations start successfully. The difference is whether analysis state is persisted and reused.
