@@ -7,7 +7,7 @@
       <button @click="$emit('render-board')">Render</button>
     </div>
 
-    <div class="toolbar" role="toolbar" aria-label="Board actions">
+    <div class="toolbar" role="group" aria-label="Analyzer controls">
       <button
         type="button"
         class="icon-btn upload-btn"
@@ -17,18 +17,27 @@
       >
         <span aria-hidden="true">⤴</span>
       </button>
+
       <button
         type="button"
-        class="icon-btn analyze-btn"
-        title="Analyze"
-        aria-label="Analyze"
+        class="icon-btn analyze-btn analyze-bulb-btn"
+        title="Analyze (SF18)"
+        aria-label="Analyze with Stockfish 18"
         :disabled="!canAnalyze || !isFenValid || isAnalyzing"
         @click="$emit('start-analysis')"
       >
-        <svg aria-hidden="true" viewBox="0 0 24 24" class="toolbar-icon toolbar-icon-solid" focusable="false">
-          <path d="M12 3.25a3.25 3.25 0 1 1 0 6.5a3.25 3.25 0 0 1 0-6.5Zm0 7.75c-2.88 0-5 2.15-5 4.85c0 1.18.42 2.22 1.13 3.03L7 21h10l-1.13-2.12c.71-.81 1.13-1.85 1.13-3.03c0-2.7-2.12-4.85-5-4.85Zm-3.67 8.5l.53-1h6.28l.53 1H8.33Z" />
+        <svg aria-hidden="true" viewBox="0 0 24 24" class="toolbar-icon toolbar-icon-bulb" focusable="false">
+          <path d="M9 18h6" />
+          <path d="M10 21h4" />
+          <path d="M8 9a4 4 0 1 1 8 0c0 1.7-.83 2.67-1.86 3.92-.65.78-1.22 1.57-1.51 2.58h-1.26c-.29-1.01-.86-1.8-1.51-2.58C8.83 11.67 8 10.7 8 9Z" />
+          <path d="M12 3v2" />
+          <path d="M4.5 9h2" />
+          <path d="M17.5 9h2" />
+          <path d="m6.2 4.7 1.4 1.4" />
+          <path d="m16.4 6.1 1.4-1.4" />
         </svg>
       </button>
+
       <button
         type="button"
         class="icon-btn stop-btn"
@@ -39,6 +48,7 @@
       >
         <span aria-hidden="true">⏹</span>
       </button>
+
       <button
         type="button"
         class="icon-btn flip-btn"
@@ -111,14 +121,18 @@ export default {
   stroke-linejoin: round;
 }
 
-.toolbar-icon-solid {
-  fill: currentColor;
-  stroke: none;
+.toolbar-icon-bulb {
+  width: 18px;
+  height: 18px;
+  overflow: visible;
 }
 
-.toolbar-icon-core {
-  fill: currentColor;
-  stroke: none;
+.toolbar-icon-bulb path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.35;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .icon-btn:hover:not(:disabled) {

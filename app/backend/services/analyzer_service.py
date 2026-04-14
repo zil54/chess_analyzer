@@ -71,11 +71,11 @@ def _analyze_with_simple_engine(fen: str, depth: int, time_limit: float, stockfi
         score_cp = None
         score_mate = None
         if score:
-            relative_score = score.relative
-            if relative_score.is_mate():
-                score_mate = relative_score.mate()
+            white_score = score.white()
+            if white_score.is_mate():
+                score_mate = white_score.mate()
             else:
-                score_cp = score.white().score()
+                score_cp = white_score.score()
 
         best_move = pv_moves[0].uci() if pv_moves else None
         pv_str = " ".join(move.uci() for move in pv_moves[:10]) if pv_moves else ""

@@ -3,6 +3,7 @@ import chess
 import chess.pgn
 import chess.svg
 import io
+import re
 
 try:
     from app.backend.db.db import (
@@ -24,6 +25,72 @@ except Exception:  # pragma: no cover
     logger = logging.getLogger("chess-analyzer")
 
 router = APIRouter()
+
+NAG_DISPLAY_MAP = {
+    1: "!",
+    2: "?",
+    3: "!!",
+    4: "??",
+    5: "!?",
+    6: "?!",
+    10: "=",
+    11: "=",
+    12: "∞",
+    13: "∞",
+    14: "+=",
+    15: "=+",
+    16: "+/-",
+    17: "-/+",
+    18: "+-",
+    19: "-+",
+    20: "+-",
+    21: "-+",
+    22: "⩲",
+    23: "⩱",
+    24: "±",
+    25: "∓",
+    26: "+-",
+    27: "-+",
+    32: "⟳",
+    36: "↑",
+    40: "→",
+    44: "⇄",
+    132: "⟳",
+    136: "↑",
+    140: "∆",
+    142: "⌓",
+    145: "RR",
+    146: "N",
+}
+
+COMMENT_ASSESSMENT_ALIAS_MAP = {
+    "1/2-1/2": "=",
+    "½-½": "=",
+    "=": "=",
+    "∞": "∞",
+    "+=": "+=",
+    "=+": "=+",
+    "+/-": "+/-",
+    "-/+": "-/+",
+    "+-": "+-",
+    "-+": "-+",
+    "++-": "+-",
+    "--+": "-+",
+    "+--": "+-",
+    "-++": "-+",
+}
+
+PURE_EVAL_COMMENT_REGEX = re.compile(
+    r"^\s*\[%eval\s(?:(?P<mate>#[+-]?\d+)|(?P<cp>[+-]?(?:\d+(?:\.\d+)?|\.\d+)))(?:,(?P<depth>\d+))?\]\s*$"
+)
+
+MOVETEXT_PURE_EVAL_COMMENT_REGEX = re.compile(
+    r"\{\s*\[%eval\s(?:(?P<mate>#[+-]?\d+)|(?P<cp>[+-]?(?:\d+(?:\.\d+)?|\.\d+)))(?:,(?P<depth>\d+))?\]\s*\}"
+)
+
+MOVETEXT_COMMENT_ALIAS_REGEX = re.compile(
+    r"\{\s*(?P<alias>1/2-1/2|½-½|=|∞|\+=|=\+|\+/-|-/\+|\+-|-\+)\s*\}"
+)
 
 
 async def _read_pgn_from_request(request: Request) -> str:
@@ -75,6 +142,130 @@ def _read_pgn_game(pgn_str: str) -> chess.pgn.Game:
     return game
 
 
+def _nag_symbols(nags: set[int] | list[int] | tuple[int, ...] | None) -> list[str]:
+    ordered_nags = sorted({int(nag) for nag in (nags or [])})
+    return [NAG_DISPLAY_MAP.get(nag, f"${nag}") for nag in ordered_nags]
+
+
+def _nag_display(nags: set[int] | list[int] | tuple[int, ...] | None) -> str | None:
+    symbols = _nag_symbols(nags)
+    return " ".join(symbols) if symbols else None
+
+
+def _assessment_display_from_eval(cp: float | None = None, mate: int | None = None) -> str | None:
+    if mate is not None:
+        if mate > 0:
+            return "+-"
+        if mate < 0:
+            return "-+"
+        return "="
+
+    if cp is None:
+        return None
+
+    if abs(cp) < 0.15:
+        return "="
+    if abs(cp) < 0.60:
+        return "+=" if cp > 0 else "=+"
+    if abs(cp) < 1.50:
+        return "+/-" if cp > 0 else "-/+"
+    return "+-" if cp > 0 else "-+"
+
+
+def _assessment_from_comment(comment: str | None) -> tuple[str | None, str | None]:
+    if comment is None:
+        return None, None
+
+    stripped = comment.strip()
+    if not stripped:
+        return None, None
+
+    alias_display = COMMENT_ASSESSMENT_ALIAS_MAP.get(stripped)
+    if alias_display:
+        return alias_display, None
+
+    match = PURE_EVAL_COMMENT_REGEX.fullmatch(stripped)
+    if not match:
+        return None, comment
+
+    mate_group = match.group("mate")
+    cp_group = match.group("cp")
+    mate_value = int(mate_group[1:]) if mate_group else None
+    cp_value = float(cp_group) if cp_group is not None else None
+    return _assessment_display_from_eval(cp=cp_value, mate=mate_value), None
+
+
+def _replace_numeric_nags_with_symbols(movetext: str) -> str:
+    return re.sub(
+        r"\$(\d+)",
+        lambda match: NAG_DISPLAY_MAP.get(int(match.group(1)), match.group(0)),
+        movetext,
+    )
+
+
+def _replace_assessment_comments_with_symbols(movetext: str) -> str:
+    def replace_eval_comment(match: re.Match[str]) -> str:
+        mate_group = match.group("mate")
+        cp_group = match.group("cp")
+        mate_value = int(mate_group[1:]) if mate_group else None
+        cp_value = float(cp_group) if cp_group is not None else None
+        display = _assessment_display_from_eval(cp=cp_value, mate=mate_value)
+        return display or match.group(0)
+
+    movetext = MOVETEXT_PURE_EVAL_COMMENT_REGEX.sub(replace_eval_comment, movetext)
+    return MOVETEXT_COMMENT_ALIAS_REGEX.sub(
+        lambda match: COMMENT_ASSESSMENT_ALIAS_MAP.get(match.group("alias"), match.group(0)),
+        movetext,
+    )
+
+
+def _annotate_position_from_node(position: dict, node: chess.pgn.GameNode | dict | None) -> dict:
+    if not position:
+        return position
+
+    if isinstance(node, dict):
+        nags = list(node.get("nags") or [])
+        nag_symbols = list(node.get("nag_symbols") or [])
+        nag_display = node.get("nag_display")
+        comment = node.get("comment")
+    else:
+        raw_nags = getattr(node, "nags", set()) or set()
+        nags = sorted(int(nag) for nag in raw_nags)
+        nag_symbols = _nag_symbols(raw_nags)
+        nag_display = _nag_display(raw_nags)
+        comment = (getattr(node, "comment", None) or None)
+
+    derived_display, normalized_comment = _assessment_from_comment(comment)
+    if nag_display is None:
+        nag_display = derived_display
+        if derived_display and not nag_symbols:
+            nag_symbols = [derived_display]
+
+    position["nags"] = nags
+    position["nag_symbols"] = nag_symbols
+    position["nag_display"] = nag_display
+    if comment is not None or normalized_comment is None:
+        position["comment"] = normalized_comment
+    return position
+
+
+def _build_mainline_node_lookup(variation_tree: dict | None) -> dict[int, dict]:
+    if not variation_tree:
+        return {}
+
+    lookup: dict[int, dict] = {0: variation_tree}
+    node = variation_tree
+    while node:
+        variations = [variation for variation in (node.get("variations") or []) if isinstance(variation, dict)]
+        mainline_child = next((variation for variation in variations if variation.get("is_mainline")), None)
+        if not mainline_child:
+            break
+        lookup[int(mainline_child.get("ply", 0))] = mainline_child
+        node = mainline_child
+
+    return lookup
+
+
 def _export_pgn_movetext(game: chess.pgn.Game) -> str:
     exporter = chess.pgn.StringExporter(
         headers=False,
@@ -82,7 +273,9 @@ def _export_pgn_movetext(game: chess.pgn.Game) -> str:
         variations=True,
         columns=None,
     )
-    return game.accept(exporter).strip()
+    movetext = game.accept(exporter).strip()
+    movetext = _replace_numeric_nags_with_symbols(movetext)
+    return _replace_assessment_comments_with_symbols(movetext)
 
 
 def _extract_pgn_movetext(pgn_str: str) -> str:
@@ -109,6 +302,9 @@ def _build_variation_tree(game: chess.pgn.Game) -> tuple[dict, list[int]]:
         "fen": board.fen(),
         "comment": (game.comment or None) if getattr(game, "comment", None) else None,
         "starting_comment": None,
+        "nags": [],
+        "nag_symbols": [],
+        "nag_display": None,
         "is_mainline": True,
         "mainline_index": 0,
         "anchor_mainline_index": 0,
@@ -154,11 +350,15 @@ def _build_variation_tree(game: chess.pgn.Game) -> tuple[dict, list[int]]:
                 "fen": child_board.fen(),
                 "comment": (child.comment or None) if getattr(child, "comment", None) else None,
                 "starting_comment": (getattr(child, "starting_comment", None) or None),
+                "nags": sorted(int(nag) for nag in (getattr(child, "nags", set()) or set())),
+                "nag_symbols": _nag_symbols(getattr(child, "nags", set()) or set()),
+                "nag_display": _nag_display(getattr(child, "nags", set()) or set()),
                 "is_mainline": is_mainline,
                 "mainline_index": mainline_index,
                 "anchor_mainline_index": anchor_mainline_index,
                 "variations": [],
             }
+            _annotate_position_from_node(node, child)
             node["variations"] = build_children(
                 child,
                 child_board,
@@ -223,6 +423,7 @@ def _parse_pgn_payload(pgn_str: str) -> tuple[dict, list[dict], list[dict], int,
                 node = node.variation(move)
                 comment = (node.comment or None) if node else None
             except Exception:
+                node = None
                 comment = None
 
             positions.append({
@@ -231,6 +432,7 @@ def _parse_pgn_payload(pgn_str: str) -> tuple[dict, list[dict], list[dict], int,
                 "move": move.uci(),
                 "san": san,
             })
+            _annotate_position_from_node(positions[-1], node)
             move_rows.append({
                 "ply": ply,
                 "san": san,
@@ -238,6 +440,7 @@ def _parse_pgn_payload(pgn_str: str) -> tuple[dict, list[dict], list[dict], int,
                 "comment": comment,
                 "cp_tag": False,
             })
+            _annotate_position_from_node(move_rows[-1], node)
 
         if ply == 0:
             raise ValueError("PGN must contain at least one legal move")
@@ -454,6 +657,9 @@ async def fetch_game_moves(game_id: int):
         try:
             movetext = _extract_pgn_movetext(raw_pgn)
             variation_tree, mainline_node_ids = _extract_pgn_tree(raw_pgn)
+            mainline_lookup = _build_mainline_node_lookup(variation_tree)
+            for position in positions:
+                _annotate_position_from_node(position, mainline_lookup.get(int(position.get("ply", 0))))
         except ValueError as e:
             logger.warning("Unable to export PGN movetext for game_id=%s: %s", game_id, e)
 

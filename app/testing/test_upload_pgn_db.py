@@ -86,3 +86,43 @@ def test_fetch_game_moves_returns_movetext_with_variations_from_stored_pgn() -> 
     assert side_variation["anchor_mainline_index"] == 0
 
 
+def test_fetch_game_moves_rehydrates_nag_symbols_from_stored_raw_pgn() -> None:
+    from app.backend.main import app
+    from fastapi.testclient import TestClient
+
+    pgn = """[Event \"NAG Test\"]
+[Site \"Local\"]
+[Date \"2026.02.21\"]
+[Round \"-\"]
+[White \"WhitePlayer\"]
+[Black \"BlackPlayer\"]
+[Result \"1-0\"]
+
+1. e4 $14 e5 $19 2. Nf3 $1 Nc6 $2 1-0
+"""
+
+    with TestClient(app) as client:
+        create_resp = client.post(
+            "/games",
+            files={"file": ("nag-game.pgn", pgn.encode("utf-8"), "application/x-chess-pgn")},
+        )
+        assert create_resp.status_code == 200, create_resp.text
+        game_id = create_resp.json()["id"]
+
+        moves_resp = client.get(f"/games/{game_id}/moves")
+
+    assert moves_resp.status_code == 200, moves_resp.text
+    payload = moves_resp.json()
+    assert "$14" not in payload["movetext"]
+    assert "$19" not in payload["movetext"]
+    assert "e4 +=" in payload["movetext"]
+    assert "e5 -+" in payload["movetext"]
+
+    e4_node = payload["variation_tree"]["variations"][0]
+    e5_node = e4_node["variations"][0]
+    assert e4_node["nag_display"] == "+="
+    assert e5_node["nag_display"] == "-+"
+    assert payload["positions"][1]["nag_display"] == "+="
+    assert payload["positions"][2]["nag_display"] == "-+"
+
+

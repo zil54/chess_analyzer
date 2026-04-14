@@ -6,7 +6,7 @@
           :pgnData="pgnData"
           :currentMove="currentMove"
           :currentPosition="currentPosition"
-          :currentTreeNode="currentTreeNode"
+          @upload-pgn="uploadPGN"
           :canGoPrev="canGoPrev"
           :canGoNext="canGoNext"
           @go-first="firstMove"
@@ -242,7 +242,7 @@ export default {
       const node = this.treeNodeMap[nodeId] || this.pgnData.variation_tree;
       if (!node?.fen) return;
 
-      this.stopLiveAnalysis();
+      const wasAnalyzing = !!this.socket;
       this.resetAnalysisState();
 
       this.currentTreeNodeId = nodeId;
@@ -256,6 +256,10 @@ export default {
 
       this.fen = node.fen;
       await this.renderBoard();
+
+      if (wasAnalyzing) {
+        this.sendAnalysisRequest();
+      }
     },
 
     convertToAlgebraic(uciMoves, fenString) {
@@ -424,6 +428,12 @@ export default {
         return;
       }
 
+      if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+        this.resetAnalysisState("Switching analysis...");
+        this.sendAnalysisRequest();
+        return;
+      }
+
       this.resetAnalysisState("Connecting to analysis service...");
       if (this.socket) this.socket.close();
 
@@ -432,13 +442,7 @@ export default {
 
       this.socket.onopen = () => {
         this.analysisStatusText = "Live analysis started";
-        this.socket.send(JSON.stringify({
-          fen: this.fen,
-          depth: LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH,
-          display_target_depth: LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH,
-          worker_target_depth: LIVE_ANALYSIS_WORKER_TARGET_DEPTH,
-          display_lag_depth: LIVE_ANALYSIS_DISPLAY_LAG_DEPTH,
-        }));
+        this.sendAnalysisRequest();
       };
       this.socket.onmessage = (event) => {
         this.handleAnalysisMessage(event.data);
@@ -457,6 +461,22 @@ export default {
         }
         this.socket = null;
       };
+    },
+
+    sendAnalysisRequest() {
+      if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+        console.warn("Cannot send analysis request: socket not open");
+        return;
+      }
+
+      this.socket.send(JSON.stringify({
+        fen: this.fen,
+        depth: 1, // Start with shallow depth for UI responsiveness
+        display_target_depth: 1,
+        worker_target_depth: LIVE_ANALYSIS_WORKER_TARGET_DEPTH,
+        display_lag_depth: 2, // Lag display behind worker by 2 depths for stability
+      }));
+      this.analysisStatusText = 'Live analysis updated';
     },
 
     stopLiveAnalysis() {
@@ -625,13 +645,17 @@ export default {
         return;
       }
 
-      this.stopLiveAnalysis();
+      const wasAnalyzing = !!this.socket;
       this.resetAnalysisState();
 
       this.currentTreeNodeId = this.getMainlineNodeId(moveIndex);
       const position = this.pgnData.positions[moveIndex];
       this.fen = position.fen;
       await this.renderBoard();
+
+      if (wasAnalyzing) {
+        this.sendAnalysisRequest();
+      }
     },
 
     async selectMove(moveIndex) {
@@ -721,6 +745,12 @@ export default {
       } else if (event.key === 'ArrowRight' && this.canGoNext) {
         event.preventDefault();
         this.nextMove();
+      } else if (event.key === 'ArrowUp' && this.canGoPrev) {
+        event.preventDefault();
+        this.prevMove();
+      } else if (event.key === 'ArrowDown' && this.canGoNext) {
+        event.preventDefault();
+        this.nextMove();
       } else if (event.key === 'Home' && this.currentMove !== 0) {
         event.preventDefault();
         this.firstMove();
@@ -771,15 +801,11 @@ export default {
     },
 
     formatEvaluationValue(scoreCp, scoreMate) {
-      const fenParts = (this.fen || "").trim().split(/\s+/);
-      const sideToMove = fenParts.length >= 2 ? fenParts[1] : 'w';
-      const sign = sideToMove === 'b' ? -1 : 1;
-
       if (scoreMate !== null && scoreMate !== undefined && scoreMate !== "") {
-        return `#${Number(scoreMate) * sign}`;
+        return `#${Number(scoreMate)}`;
       }
       if (scoreCp !== null && scoreCp !== undefined && scoreCp !== "") {
-        return (Number(scoreCp) * sign / 100).toFixed(2);
+        return (Number(scoreCp) / 100).toFixed(2);
       }
       return "--";
     },
@@ -867,17 +893,12 @@ export default {
             linesByDepth[depth] = [];
           }
           if (linesByDepth[depth].length < 3) {  // Keep all 3 lines
-            const fenParts = (this.fen || "").trim().split(/\s+/);
-            const sideToMove = fenParts.length >= 2 ? fenParts[1] : 'w';
-            const sign = sideToMove === 'b' ? -1 : 1;
-
             const rawScore = parseInt(scoreMatch[2], 10);
-            const normalizedScore = rawScore * sign;
 
             const evalValue =
               scoreMatch[1] === "cp"
-                ? (normalizedScore / 100).toFixed(2)
-                : `#${normalizedScore}`;
+                ? (rawScore / 100).toFixed(2)
+                : `#${rawScore}`;
 
             const pvUci = pvMatch ? pvMatch[1] : "";
             const pvAlgebraic = pvUci
