@@ -24,7 +24,11 @@
 
       <!-- CENTER SECTION: Board, navigation arrows, analysis -->
       <div class="center-stage board-area">
-        <BoardDisplay :svgBoard="svgBoard" />
+        <BoardDisplay
+          :fen="fen"
+          :flipped="boardFlipped"
+          @user-move="onUserMove"
+        />
 
         <div class="board-controls" v-if="pgnData">
           <button @click="firstMove" :disabled="currentMove === 0">|&lt; First</button>
@@ -44,7 +48,9 @@
       <!-- RIGHT SECTION: Tabs -->
       <aside class="right-panel">
         <div class="tabs-header">
-          <button :class="{active: activeTab === 'PGN'}" @click="activeTab = 'PGN'">PGN</button>
+          <button :class="{active: activeTab === 'PGN'}" @click="activeTab = 'PGN'">
+            PGN<span v-if="hasUnsavedChanges"> *</span>
+          </button>
           <button
             :class="{active: activeTab === 'Games'}"
             @click="activeTab = 'Games'"
@@ -72,6 +78,10 @@
               @select-move="selectMove"
               @select-tree-node="selectTreeNode"
             />
+            <div v-if="hasUnsavedChanges" class="pgn-save-actions">
+              <button @click="saveChanges" class="btn-save">Save</button>
+              <button @click="discardChanges" class="btn-discard">Cancel</button>
+            </div>
           </template>
         </div>
 
@@ -178,10 +188,14 @@ export default {
       sessionGameIds: [],
       isUploading: false,
       uploadStatus: "",
-    };
-    },
 
-    mounted() {
+      hasUnsavedChanges: false,
+      unsavedNodeIds: [],
+      backupTreeNodeId: null,
+    };
+  },
+
+  mounted() {
     document.title = "Chess Analyzer";
     // Set default starting position
     this.fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -345,12 +359,16 @@ export default {
       this.resetAnalysisState();
 
       this.currentTreeNodeId = nodeId;
+
+      // Attempt to resolve mainline index if present to keep board controls aligned
       if (Number.isInteger(preferredMoveIndex)) {
         this.currentMove = preferredMoveIndex;
       } else if (Number.isInteger(node.mainline_index)) {
         this.currentMove = node.mainline_index;
       } else if (Number.isInteger(node.anchor_mainline_index)) {
         this.currentMove = node.anchor_mainline_index;
+      } else if (Number.isInteger(node.ply)) {
+        this.currentMove = node.ply;
       }
 
       this.fen = node.fen;
@@ -461,12 +479,115 @@ export default {
     },
 
     async renderBoard() {
-      const res = await fetch(this.apiUrl("/svg"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fen: this.fen, flip: this.boardFlipped })
-      });
-      this.svgBoard = await res.text();
+      // Replaced by vue3-chessboard rendering automatically
+    },
+
+    generateNewNodeId() {
+      let maxId = 0;
+      const root = this.pgnData?.variation_tree;
+      if (!root) return 1;
+
+      const stack = [root];
+      while (stack.length) {
+        const node = stack.pop();
+        if (node && Number.isInteger(node.id) && node.id > maxId) {
+          maxId = node.id;
+        }
+        const vars = Array.isArray(node.variations) ? node.variations : [];
+        for (let i = 0; i < vars.length; i++) {
+          stack.push(vars[i]);
+        }
+      }
+      return maxId + 1;
+    },
+
+    async onUserMove(moveInfo) {
+      if (!this.pgnData || !this.pgnData.variation_tree) {
+        this.fen = moveInfo.fen;
+        if (this.socket) this.analyzeLive();
+        return;
+      }
+
+      const parentNode = this.currentTreeNode || this.pgnData.variation_tree;
+      const parentNodeId = Number.isInteger(parentNode.id) ? parentNode.id : 0;
+
+      // Extract algebraic notation
+      let san = moveInfo.san;
+      if (!san) {
+        try {
+          const chess = new Chess(parentNode.fen);
+          const moveResult = chess.move({
+            from: moveInfo.from,
+            to: moveInfo.to,
+            promotion: moveInfo.promotion || 'q'
+          });
+          if (moveResult) san = moveResult.san;
+        } catch (err) {
+          console.warn("Invalid user move recalculation", err);
+          san = null;
+        }
+      }
+
+      if (!san) return;
+
+      const newPly = (parentNode.ply || 0) + 1;
+      const newColor = newPly % 2 === 1 ? 'w' : 'b';
+      const newMoveNumber = Math.ceil(newPly / 2);
+
+      const newId = this.generateNewNodeId();
+      const newNode = {
+        id: newId,
+        san: san,
+        fen: moveInfo.fen,
+        ply: newPly,
+        color: newColor,
+        move_number: newMoveNumber,
+        is_mainline: false,
+        variations: []
+      };
+
+      if (!parentNode.variations) parentNode.variations = [];
+      parentNode.variations.push(newNode);
+
+      if (!this.hasUnsavedChanges) {
+        this.hasUnsavedChanges = true;
+        this.backupTreeNodeId = parentNodeId;
+        this.unsavedNodeIds = [];
+      }
+      this.unsavedNodeIds.push(newId);
+
+      // Force Vue to recognize deep reactivity by replacing array
+      parentNode.variations = [...parentNode.variations];
+
+      await this.selectTreeNode(newId);
+    },
+
+    saveChanges() {
+      // Logic for saving custom variations to the backend can go here.
+      // For now, commit them locally.
+      this.hasUnsavedChanges = false;
+      this.unsavedNodeIds = [];
+      this.backupTreeNodeId = null;
+    },
+
+    discardChanges() {
+      if (!this.pgnData?.variation_tree) return;
+
+      const prune = (node) => {
+        if (!node || !Array.isArray(node.variations)) return;
+        node.variations = node.variations.filter(v => !this.unsavedNodeIds.includes(v.id));
+        node.variations.forEach(prune);
+      };
+
+      prune(this.pgnData.variation_tree);
+
+      if (this.backupTreeNodeId !== null) {
+        this.showTreeNode(this.backupTreeNodeId);
+      }
+
+      this.hasUnsavedChanges = false;
+      this.unsavedNodeIds = [];
+      this.backupTreeNodeId = null;
     },
 
     formatAnalysisStatus(payload, sourceLabel = "Analysis") {
@@ -1156,14 +1277,42 @@ input, button {
 }
 
 .pv-moves {
-  font-family: 'Courier New', Courier, monospace;
-  color: #555;
-  font-size: 12px;
-  flex: 1;
-  word-wrap: break-word;
-  overflow-wrap: break-word;
-  word-break: break-word;
-  white-space: pre-wrap;
+  max-height: 400px;
+  overflow-y: auto;
 }
+
+.pgn-save-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 15px;
+  justify-content: center;
+}
+
+.pgn-save-actions button {
+  padding: 8px 16px;
+  font-weight: bold;
+}
+
+.btn-save {
+  background-color: #4CAF50;
+  color: white;
+  border: none;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.btn-discard {
+  background-color: #95a5a6;
+  color: white;
+  border: none;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.btn-discard:hover {
+  background-color: #7f8c8d;
+}
+
+/* ...existing code... */
 </style>
 
