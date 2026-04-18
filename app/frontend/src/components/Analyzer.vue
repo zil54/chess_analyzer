@@ -501,7 +501,7 @@ export default {
       return maxId + 1;
     },
 
-    onUserMove(moveInfo) {
+    async onUserMove(moveInfo) {
       if (!this.pgnData || !this.pgnData.variation_tree) {
         this.fen = moveInfo.fen;
         if (this.socket) this.analyzeLive();
@@ -511,58 +511,55 @@ export default {
       const parentNode = this.currentTreeNode || this.pgnData.variation_tree;
       const parentNodeId = Number.isInteger(parentNode.id) ? parentNode.id : 0;
 
-      // Extract algebraic notation via chess.js
-      let san = null;
-      try {
-         const chess = new Chess(parentNode.fen);
-         const moveResult = chess.move({
-           from: moveInfo.from,
-           to: moveInfo.to,
-           promotion: moveInfo.promotion || 'q'
-         });
-         if (moveResult) san = moveResult.san;
-      } catch (err) {
-         console.warn("Invalid user move", err);
-         return;
+      // Extract algebraic notation
+      let san = moveInfo.san;
+      if (!san) {
+        try {
+          const chess = new Chess(parentNode.fen);
+          const moveResult = chess.move({
+            from: moveInfo.from,
+            to: moveInfo.to,
+            promotion: moveInfo.promotion || 'q'
+          });
+          if (moveResult) san = moveResult.san;
+        } catch (err) {
+          console.warn("Invalid user move recalculation", err);
+          san = null;
+        }
       }
 
       if (!san) return;
 
-      let variations = Array.isArray(parentNode.variations) ? parentNode.variations : [];
-      let existingChild = variations.find(v => v.san === san);
+      const newPly = (parentNode.ply || 0) + 1;
+      const newColor = newPly % 2 === 1 ? 'w' : 'b';
+      const newMoveNumber = Math.ceil(newPly / 2);
 
-      if (existingChild) {
-        this.selectTreeNode(existingChild.id);
-      } else {
-        const newId = this.generateNewNodeId();
-        const newNode = {
-          id: newId,
-          san: san,
-          fen: moveInfo.fen,
-          ply: (parentNode.ply || 0) + 1,
-          is_mainline: false,
-          variations: []
-        };
+      const newId = this.generateNewNodeId();
+      const newNode = {
+        id: newId,
+        san: san,
+        fen: moveInfo.fen,
+        ply: newPly,
+        color: newColor,
+        move_number: newMoveNumber,
+        is_mainline: false,
+        variations: []
+      };
 
-        if (!parentNode.variations) parentNode.variations = [];
-        parentNode.variations.push(newNode);
+      if (!parentNode.variations) parentNode.variations = [];
+      parentNode.variations.push(newNode);
 
-        if (!this.hasUnsavedChanges) {
-          this.hasUnsavedChanges = true;
-          this.backupTreeNodeId = parentNodeId;
-          this.unsavedNodeIds = [];
-        }
-        this.unsavedNodeIds.push(newId);
-
-        // Force Vue to recognize deep reactivity by replacing array
-        parentNode.variations = [...parentNode.variations];
-
-        this.selectTreeNode(newId);
+      if (!this.hasUnsavedChanges) {
+        this.hasUnsavedChanges = true;
+        this.backupTreeNodeId = parentNodeId;
+        this.unsavedNodeIds = [];
       }
+      this.unsavedNodeIds.push(newId);
 
-      if (this.socket) {
-        this.analyzeLive();
-      }
+      // Force Vue to recognize deep reactivity by replacing array
+      parentNode.variations = [...parentNode.variations];
+
+      await this.selectTreeNode(newId);
     },
 
     saveChanges() {

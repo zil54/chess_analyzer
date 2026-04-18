@@ -2,6 +2,7 @@
   <div class="board-display">
     <TheChessboard
       :board-config="boardConfig"
+      player-color="both"
       @board-created="onBoardCreated"
       @move="handleMove"
     />
@@ -35,6 +36,10 @@ export default {
         animation: {
           enabled: true,
           duration: 200
+        },
+        movable: {
+          color: 'both',
+          free: false
         }
       };
     }
