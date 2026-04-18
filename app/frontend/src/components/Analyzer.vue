@@ -24,7 +24,17 @@
 
       <!-- CENTER SECTION: Board, navigation arrows, analysis -->
       <div class="center-stage board-area">
-        <BoardDisplay :svgBoard="svgBoard" />
+        <BoardDisplay
+          :fen="fen"
+          :flipped="boardFlipped"
+          @user-move="onUserMove"
+        />
+
+        <div v-if="hasUnsavedChanges" class="unsaved-changes-banner">
+          <span>Unsaved moves!</span>
+          <button @click="saveChanges" class="btn-save">Save</button>
+          <button @click="discardChanges" class="btn-discard">Discard</button>
+        </div>
 
         <div class="board-controls" v-if="pgnData">
           <button @click="firstMove" :disabled="currentMove === 0">|&lt; First</button>
@@ -178,10 +188,14 @@ export default {
       sessionGameIds: [],
       isUploading: false,
       uploadStatus: "",
-    };
-    },
 
-    mounted() {
+      hasUnsavedChanges: false,
+      unsavedNodeIds: [],
+      backupTreeNodeId: null,
+    };
+  },
+
+  mounted() {
     document.title = "Chess Analyzer";
     // Set default starting position
     this.fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -345,12 +359,16 @@ export default {
       this.resetAnalysisState();
 
       this.currentTreeNodeId = nodeId;
+
+      // Attempt to resolve mainline index if present to keep board controls aligned
       if (Number.isInteger(preferredMoveIndex)) {
         this.currentMove = preferredMoveIndex;
       } else if (Number.isInteger(node.mainline_index)) {
         this.currentMove = node.mainline_index;
       } else if (Number.isInteger(node.anchor_mainline_index)) {
         this.currentMove = node.anchor_mainline_index;
+      } else if (Number.isInteger(node.ply)) {
+        this.currentMove = node.ply;
       }
 
       this.fen = node.fen;
@@ -461,12 +479,118 @@ export default {
     },
 
     async renderBoard() {
-      const res = await fetch(this.apiUrl("/svg"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fen: this.fen, flip: this.boardFlipped })
-      });
-      this.svgBoard = await res.text();
+      // Replaced by vue3-chessboard rendering automatically
+    },
+
+    generateNewNodeId() {
+      let maxId = 0;
+      const root = this.pgnData?.variation_tree;
+      if (!root) return 1;
+
+      const stack = [root];
+      while (stack.length) {
+        const node = stack.pop();
+        if (node && Number.isInteger(node.id) && node.id > maxId) {
+          maxId = node.id;
+        }
+        const vars = Array.isArray(node.variations) ? node.variations : [];
+        for (let i = 0; i < vars.length; i++) {
+          stack.push(vars[i]);
+        }
+      }
+      return maxId + 1;
+    },
+
+    onUserMove(moveInfo) {
+      if (!this.pgnData || !this.pgnData.variation_tree) {
+        this.fen = moveInfo.fen;
+        if (this.socket) this.analyzeLive();
+        return;
+      }
+
+      const parentNode = this.currentTreeNode || this.pgnData.variation_tree;
+      const parentNodeId = Number.isInteger(parentNode.id) ? parentNode.id : 0;
+
+      // Extract algebraic notation via chess.js
+      let san = null;
+      try {
+         const chess = new Chess(parentNode.fen);
+         const moveResult = chess.move({
+           from: moveInfo.from,
+           to: moveInfo.to,
+           promotion: moveInfo.promotion || 'q'
+         });
+         if (moveResult) san = moveResult.san;
+      } catch (err) {
+         console.warn("Invalid user move", err);
+         return;
+      }
+
+      if (!san) return;
+
+      let variations = Array.isArray(parentNode.variations) ? parentNode.variations : [];
+      let existingChild = variations.find(v => v.san === san);
+
+      if (existingChild) {
+        this.selectTreeNode(existingChild.id);
+      } else {
+        const newId = this.generateNewNodeId();
+        const newNode = {
+          id: newId,
+          san: san,
+          fen: moveInfo.fen,
+          ply: (parentNode.ply || 0) + 1,
+          is_mainline: false,
+          variations: []
+        };
+
+        if (!parentNode.variations) parentNode.variations = [];
+        parentNode.variations.push(newNode);
+
+        if (!this.hasUnsavedChanges) {
+          this.hasUnsavedChanges = true;
+          this.backupTreeNodeId = parentNodeId;
+          this.unsavedNodeIds = [];
+        }
+        this.unsavedNodeIds.push(newId);
+
+        // Force Vue to recognize deep reactivity by replacing array
+        parentNode.variations = [...parentNode.variations];
+
+        this.selectTreeNode(newId);
+      }
+
+      if (this.socket) {
+        this.analyzeLive();
+      }
+    },
+
+    saveChanges() {
+      // Logic for saving custom variations to the backend can go here.
+      // For now, commit them locally.
+      this.hasUnsavedChanges = false;
+      this.unsavedNodeIds = [];
+      this.backupTreeNodeId = null;
+    },
+
+    discardChanges() {
+      if (!this.pgnData?.variation_tree) return;
+
+      const prune = (node) => {
+        if (!node || !Array.isArray(node.variations)) return;
+        node.variations = node.variations.filter(v => !this.unsavedNodeIds.includes(v.id));
+        node.variations.forEach(prune);
+      };
+
+      prune(this.pgnData.variation_tree);
+
+      if (this.backupTreeNodeId !== null) {
+        this.showTreeNode(this.backupTreeNodeId);
+      }
+
+      this.hasUnsavedChanges = false;
+      this.unsavedNodeIds = [];
+      this.backupTreeNodeId = null;
     },
 
     formatAnalysisStatus(payload, sourceLabel = "Analysis") {
@@ -1164,6 +1288,34 @@ input, button {
   overflow-wrap: break-word;
   word-break: break-word;
   white-space: pre-wrap;
+}
+
+.unsaved-changes-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background-color: #ffebee;
+  color: #c62828;
+  padding: 8px 16px;
+  border-radius: 4px;
+  margin-top: 8px;
+  font-weight: bold;
+}
+.btn-save {
+  background-color: #4CAF50;
+  color: white;
+  border: none;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.btn-discard {
+  background-color: #f44336;
+  color: white;
+  border: none;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
 }
 </style>
 
