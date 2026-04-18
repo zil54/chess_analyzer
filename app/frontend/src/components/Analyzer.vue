@@ -30,12 +30,6 @@
           @user-move="onUserMove"
         />
 
-        <div v-if="hasUnsavedChanges" class="unsaved-changes-banner">
-          <span>Unsaved moves!</span>
-          <button @click="saveChanges" class="btn-save">Save</button>
-          <button @click="discardChanges" class="btn-discard">Discard</button>
-        </div>
-
         <div class="board-controls" v-if="pgnData">
           <button @click="firstMove" :disabled="currentMove === 0">|&lt; First</button>
           <button @click="prevMove" :disabled="!canGoPrev">&lt; Prev</button>
@@ -54,7 +48,9 @@
       <!-- RIGHT SECTION: Tabs -->
       <aside class="right-panel">
         <div class="tabs-header">
-          <button :class="{active: activeTab === 'PGN'}" @click="activeTab = 'PGN'">PGN</button>
+          <button :class="{active: activeTab === 'PGN'}" @click="activeTab = 'PGN'">
+            PGN<span v-if="hasUnsavedChanges"> *</span>
+          </button>
           <button
             :class="{active: activeTab === 'Games'}"
             @click="activeTab = 'Games'"
@@ -82,6 +78,10 @@
               @select-move="selectMove"
               @select-tree-node="selectTreeNode"
             />
+            <div v-if="hasUnsavedChanges" class="pgn-save-actions">
+              <button @click="saveChanges" class="btn-save">Save</button>
+              <button @click="discardChanges" class="btn-discard">Cancel</button>
+            </div>
           </template>
         </div>
 
@@ -1277,27 +1277,22 @@ input, button {
 }
 
 .pv-moves {
-  font-family: 'Courier New', Courier, monospace;
-  color: #555;
-  font-size: 12px;
-  flex: 1;
-  word-wrap: break-word;
-  overflow-wrap: break-word;
-  word-break: break-word;
-  white-space: pre-wrap;
+  max-height: 400px;
+  overflow-y: auto;
 }
 
-.unsaved-changes-banner {
+.pgn-save-actions {
   display: flex;
-  align-items: center;
   gap: 10px;
-  background-color: #ffebee;
-  color: #c62828;
+  margin-top: 15px;
+  justify-content: center;
+}
+
+.pgn-save-actions button {
   padding: 8px 16px;
-  border-radius: 4px;
-  margin-top: 8px;
   font-weight: bold;
 }
+
 .btn-save {
   background-color: #4CAF50;
   color: white;
@@ -1307,12 +1302,17 @@ input, button {
   cursor: pointer;
 }
 .btn-discard {
-  background-color: #f44336;
+  background-color: #95a5a6;
   color: white;
   border: none;
+  cursor: pointer;
   padding: 4px 8px;
   border-radius: 4px;
-  cursor: pointer;
 }
+.btn-discard:hover {
+  background-color: #7f8c8d;
+}
+
+/* ...existing code... */
 </style>
 

@@ -2,6 +2,7 @@
   <div class="board-display">
     <TheChessboard
       :board-config="boardConfig"
+      :reactive-config="true"
       player-color="both"
       @board-created="onBoardCreated"
       @move="handleMove"
@@ -45,21 +46,6 @@ export default {
     }
   },
   watch: {
-    fen(newFen) {
-      if (this.boardApi && newFen) {
-        try {
-          const currentBoardFen = typeof this.boardApi.getFen === 'function'
-            ? this.boardApi.getFen()
-            : (this.boardApi.game ? this.boardApi.game.fen() : "");
-
-          if (currentBoardFen !== newFen) {
-            this.boardApi.setPosition(newFen);
-          }
-        } catch (err) {
-          console.warn("Invalid FEN passed to boardApi", err);
-        }
-      }
-    },
     flipped(newVal) {
       if (this.boardApi && typeof this.boardApi.toggleOrientation === 'function') {
         this.boardApi.toggleOrientation();
@@ -75,10 +61,9 @@ export default {
     },
     handleMove(moveInfo) {
       if (moveInfo) {
-        // ensure we reliably inject the fen string
-        const moveFen = moveInfo.after ||
-                        (typeof this.boardApi.getFen === 'function' ? this.boardApi.getFen() : null) ||
-                        (this.boardApi.game ? this.boardApi.game.fen() : null);
+        const moveFen = (this.boardApi && this.boardApi.game)
+            ? this.boardApi.game.fen()
+            : (moveInfo.after || "");
 
         this.$emit('user-move', {
           ...moveInfo,
