@@ -513,10 +513,7 @@ async def render_svg(request: Request):
 
 @router.post("/games")
 async def create_game_from_pgn(request: Request):
-    """Create a game from uploaded PGN, persist all positions (FENs) into DB.
-
-    Accepts multipart/form-data with a `file` field (PGN), or JSON {"pgn": "..."}.
-    Returns: { id, headers, total_moves } when DB enabled, or { id, headers, total_moves, positions } when DB disabled
+    """Create games from uploaded PGN. Supports multiple games.
     """
     logger.info("=== POST /games called ===")
     logger.info(f"DB_ENABLED: {DB_ENABLED}")
@@ -524,43 +521,33 @@ async def create_game_from_pgn(request: Request):
     pgn_str = await _read_pgn_from_request(request)
     logger.info(f"Read PGN: {len(pgn_str)} bytes")
 
-    try:
-        headers, positions, move_rows, ply, movetext, variation_tree, mainline_node_ids = _parse_pgn_payload(pgn_str)
-        logger.info(f"Parsed {ply} plies from PGN")
+    # Split and process all games in the PGN
+    pgn_io = io.StringIO(pgn_str)
+    created_games = []
 
-    except ValueError as e:
-        logger.error(f"Invalid PGN format: {e}")
-        raise HTTPException(status_code=400, detail=f"Invalid PGN format: {str(e)}")
-    except Exception as e:
-        logger.error(f"Error processing PGN: {e}")
-        raise HTTPException(status_code=500, detail=f"Error processing PGN: {str(e)}")
+    while True:
+        game = chess.pgn.read_game(pgn_io)
+        if game is None:
+            break
 
-    if DB_ENABLED:
-        # Persist to DB
+        # Convert back to string for parsing/saving
+        game_str = str(game)
         try:
-            logger.info(f"Calling create_game...")
-            game_id = await create_game(pgn_str, headers)
-            logger.info(f"Game created with ID: {game_id}")
+            headers, positions, move_rows, ply, movetext, variation_tree, mainline_node_ids = _parse_pgn_payload(game_str)
+            logger.info(f"Parsed {ply} plies from a game in PGN")
+        except ValueError as e:
+            logger.error(f"Invalid game format in PGN: {e}")
+            continue # Skip invalid games
 
-            logger.info(f"Calling insert_moves with {len(move_rows)} rows...")
-            await insert_moves(game_id, move_rows)
-            logger.info(f"Moves inserted successfully")
+        game_id = None
+        if DB_ENABLED:
+            try:
+                game_id = await create_game(game_str, headers)
+                await insert_moves(game_id, move_rows)
+            except Exception as e:
+                logger.error(f"DB error during insert: {e}", exc_info=True)
 
-        except Exception as e:
-            logger.error(f"DB error during insert: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"DB error: {str(e)}")
-
-        logger.info(
-            "Stored game_id=%s to DB (white=%s black=%s result=%s) with %s plies",
-            game_id,
-            headers.get("white"),
-            headers.get("black"),
-            headers.get("result"),
-            ply,
-        )
-
-        return {
-            "success": True,
+        created_games.append({
             "id": game_id,
             "headers": headers,
             "total_moves": ply,
@@ -568,20 +555,24 @@ async def create_game_from_pgn(request: Request):
             "movetext": movetext,
             "variation_tree": variation_tree,
             "mainline_node_ids": mainline_node_ids,
-        }
-    else:
-        # No DB: return positions directly
-        logger.info("DB not enabled, returning parsed positions without persistence")
-        return {
-            "success": True,
-            "id": None,
-            "headers": headers,
-            "total_moves": len(positions) - 1,
-            "positions": positions,
-            "movetext": movetext,
-            "variation_tree": variation_tree,
-            "mainline_node_ids": mainline_node_ids,
-        }
+        })
+
+    if not created_games:
+        raise HTTPException(status_code=400, detail="No valid games found in PGN")
+
+    first_game = created_games[0]
+    return {
+        "success": True,
+        "id": first_game["id"],
+        "headers": first_game["headers"],
+        "total_moves": first_game["total_moves"],
+        "positions": first_game["positions"],
+        "movetext": first_game["movetext"],
+        "variation_tree": first_game["variation_tree"],
+        "mainline_node_ids": first_game["mainline_node_ids"],
+        "all_created_ids": [g["id"] for g in created_games if g["id"] is not None],
+        "total_games_created": len(created_games)
+    }
 
 @router.get("/games")
 async def list_games():
@@ -649,23 +640,32 @@ async def fetch_game_moves(game_id: int):
         for r in rows
     ]
 
+    headers = {}
     movetext = None
     variation_tree = None
     mainline_node_ids = None
     raw_pgn = await get_game_raw_pgn(game_id)
     if raw_pgn:
         try:
-            movetext = _extract_pgn_movetext(raw_pgn)
-            variation_tree, mainline_node_ids = _extract_pgn_tree(raw_pgn)
+            # Extract headers from raw PGN
+            headers, _, _, _, movetext_extracted, variation_tree, mainline_node_ids = _parse_pgn_payload(raw_pgn)
+            movetext = movetext_extracted
             mainline_lookup = _build_mainline_node_lookup(variation_tree)
             for position in positions:
                 _annotate_position_from_node(position, mainline_lookup.get(int(position.get("ply", 0))))
         except ValueError as e:
             logger.warning("Unable to export PGN movetext for game_id=%s: %s", game_id, e)
+            # Fallback: try to extract just movetext if full parse fails
+            try:
+                movetext = _extract_pgn_movetext(raw_pgn)
+                variation_tree, mainline_node_ids = _extract_pgn_tree(raw_pgn)
+            except:
+                pass
 
     return {
         "success": True,
         "game_id": game_id,
+        "headers": headers,
         "total_moves": max(0, len(positions) - 1),
         "positions": positions,
         "movetext": movetext,

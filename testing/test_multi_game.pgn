@@ -1,0 +1,20 @@
+[Event "Game 1"]
+[Site "?"]
+[Date "2024.01.01"]
+[Round "1"]
+[White "Player1"]
+[Black "Player2"]
+[Result "1-0"]
+
+1.e4 c5 2.Nf3 d6 3.d4 cxd4 4.Nxd4 1-0
+
+[Event "Game 2"]
+[Site "?"]
+[Date "2024.01.02"]
+[Round "1"]
+[White "Player3"]
+[Black "Player4"]
+[Result "0-1"]
+
+1.d4 Nf6 2.c4 e6 3.Nc3 Bb4 0-1
+

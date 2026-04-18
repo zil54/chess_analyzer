@@ -11,11 +11,13 @@
       <button
         type="button"
         class="icon-btn upload-btn"
-        title="Upload PGN"
+        title="Upload PGN Database"
         aria-label="Upload PGN"
         @click="$emit('upload-pgn')"
       >
-        <span aria-hidden="true">⤴</span>
+        <svg aria-hidden="true" viewBox="0 0 24 24" class="toolbar-icon" focusable="false">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" />
+        </svg>
       </button>
 
       <button
@@ -41,12 +43,14 @@
       <button
         type="button"
         class="icon-btn stop-btn"
-        title="Stop"
-        aria-label="Stop"
+        title="Stop Analysis"
+        aria-label="Stop Analysis"
         :disabled="!isAnalyzing"
         @click="$emit('stop-analysis')"
       >
-        <span aria-hidden="true">⏹</span>
+        <svg aria-hidden="true" viewBox="0 0 24 24" class="toolbar-icon" focusable="false">
+          <rect x="6" y="6" width="12" height="12" rx="2" />
+        </svg>
       </button>
 
       <button
@@ -56,7 +60,36 @@
         aria-label="Flip Board"
         @click="$emit('flip-board')"
       >
-        <span aria-hidden="true">↻</span>
+        <svg aria-hidden="true" viewBox="0 0 24 24" class="toolbar-icon" focusable="false">
+          <path d="M8 18V6M8 6L4 10M8 6L12 10M16 6V18M16 18L12 14M16 18L20 14" />
+        </svg>
+      </button>
+
+      <button
+        type="button"
+        class="icon-btn future-btn"
+        title="Board Settings (future)"
+        aria-label="Board Settings"
+        disabled
+      >
+        <svg aria-hidden="true" viewBox="0 0 24 24" class="toolbar-icon" focusable="false">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.61.82.33l-.06.06a2 2 0 0 1l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+        </svg>
+      </button>
+
+      <button
+        type="button"
+        class="icon-btn future-btn"
+        title="Quiz Mode (future)"
+        aria-label="Quiz Mode"
+        disabled
+      >
+        <svg aria-hidden="true" viewBox="0 0 24 24" class="toolbar-icon" focusable="false">
+          <circle cx="12" cy="12" r="10" />
+          <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+          <line x1="12" y1="17" x2="12.01" y2="17" />
+        </svg>
       </button>
     </div>
   </div>
@@ -87,13 +120,14 @@ export default {
 
 .toolbar {
   display: inline-flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 6px 10px;
+  padding: 10px 6px;
   background: rgba(248, 250, 252, 0.96);
   border: 1px solid #d8dee4;
-  border-radius: 999px;
+  border-radius: 99px;
   box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
 }
 
@@ -164,5 +198,11 @@ export default {
 .flip-btn {
   background: #ede9fe;
   color: #6d28d9;
+}
+
+.future-btn {
+  background: #f1f5f9;
+  color: #94a3b8;
+  cursor: not-allowed;
 }
 </style>
