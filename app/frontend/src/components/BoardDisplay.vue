@@ -15,16 +15,17 @@ export default {
 
 <style scoped>
 .board-display {
-  margin-top: 10px;
   width: 100%;
   display: flex;
   justify-content: center;
 }
 
 #svg-container {
-  width: min(100%, 440px);
+  width: min(100%, 560px);
   aspect-ratio: 1 / 1;
   overflow: hidden;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  border-radius: 4px;
 }
 
 #svg-container :deep(svg) {

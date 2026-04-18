@@ -1,23 +1,12 @@
 <template>
   <div class="analyzer">
+    <div v-if="isUploading" class="upload-overlay">
+      <div class="upload-spinner"></div>
+      <p>{{ uploadStatus }}</p>
+    </div>
     <div class="layout">
-      <div class="top-left">
-        <PgnPanel
-          :pgnData="pgnData"
-          :currentMove="currentMove"
-          :currentPosition="currentPosition"
-          :currentTreeNode="currentTreeNode"
-          :canGoPrev="canGoPrev"
-          :canGoNext="canGoNext"
-          @go-first="firstMove"
-          @go-prev="prevMove"
-          @go-next="nextMove"
-          @go-last="lastMove"
-          @select-move="selectMove"
-        />
-      </div>
-
-      <div class="mid-left board-area">
+      <!-- LEFT SECTION: Vertically stacked options -->
+      <aside class="left-sidebar">
         <FenControls
           :fen="fen"
           :isFenValid="isFenValid"
@@ -27,13 +16,22 @@
           @render-board="renderBoard"
           @start-analysis="analyzeLive"
           @stop-analysis="stopLiveAnalysis"
-          @upload-pgn="uploadPGN"
+          @upload-pgn="triggerUpload"
           @flip-board="flipBoard"
         />
+        <input type="file" ref="fileInput" @change="uploadPGN" accept=".pgn" style="display: none" />
+      </aside>
 
-        <BoardDisplay
-          :svgBoard="svgBoard"
-        />
+      <!-- CENTER SECTION: Board, navigation arrows, analysis -->
+      <div class="center-stage board-area">
+        <BoardDisplay :svgBoard="svgBoard" />
+
+        <div class="board-controls" v-if="pgnData">
+          <button @click="firstMove" :disabled="currentMove === 0">|&lt; First</button>
+          <button @click="prevMove" :disabled="!canGoPrev">&lt; Prev</button>
+          <button @click="nextMove" :disabled="!canGoNext">Next &gt;</button>
+          <button @click="lastMove" :disabled="currentMove === pgnData.total_moves">Last &gt;|</button>
+        </div>
 
         <LiveAnalysisPanel
           :lines="currentAnalysisLines"
@@ -43,14 +41,51 @@
         />
       </div>
 
+      <!-- RIGHT SECTION: Tabs -->
       <aside class="right-panel">
-        <PgnMovesList
-          :pgnData="pgnData"
-          :currentMove="currentMove"
-          :currentNodeId="currentTreeNodeId"
-          @select-move="selectMove"
-          @select-tree-node="selectTreeNode"
-        />
+        <div class="tabs-header">
+          <button :class="{active: activeTab === 'PGN'}" @click="activeTab = 'PGN'">PGN</button>
+          <button
+            :class="{active: activeTab === 'Games'}"
+            @click="activeTab = 'Games'"
+            :disabled="sessionGames.length === 0"
+          >
+            Games ({{sessionGames.length}})
+          </button>
+          <button :class="{active: activeTab === 'Quiz'}" @click="activeTab = 'Quiz'" disabled>Quiz</button>
+        </div>
+
+        <div class="tab-content" v-show="activeTab === 'PGN'">
+          <div v-if="!pgnData" class="empty-state">
+            <p>Upload a PGN file or choose a game to see its moves here.</p>
+          </div>
+          <template v-else>
+            <PgnPanel
+              :pgnData="pgnData"
+              :currentMove="currentMove"
+              :currentPosition="currentPosition"
+            />
+            <PgnMovesList
+              :pgnData="pgnData"
+              :currentMove="currentMove"
+              :currentNodeId="currentTreeNodeId"
+              @select-move="selectMove"
+              @select-tree-node="selectTreeNode"
+            />
+          </template>
+        </div>
+
+        <div class="tab-content" v-show="activeTab === 'Games' && sessionGames.length > 0">
+          <GameSelector
+            :games="sessionGames"
+            :initialGameId="gameId"
+            @select-game="loadGame"
+          />
+        </div>
+
+        <div class="tab-content" v-show="activeTab === 'Quiz'">
+          <p>Quiz mode coming soon...</p>
+        </div>
       </aside>
     </div>
   </div>
@@ -68,6 +103,7 @@ import PgnPanel from './PgnPanel.vue';
 import PgnMovesList from './PgnMovesList.vue';
 import BoardDisplay from './BoardDisplay.vue';
 import LiveAnalysisPanel from './LiveAnalysisPanel.vue';
+import GameSelector from './GameSelector.vue';
 
 const DEFAULT_BACKEND_PORT = '8000';
 
@@ -103,15 +139,17 @@ function buildWebSocketUrl(path) {
 
 export default {
   name: 'Analyzer',
-  components: {
+    components: {
     FenControls,
     PgnPanel,
     PgnMovesList,
     BoardDisplay,
-    LiveAnalysisPanel
-  },
+    LiveAnalysisPanel,
+    GameSelector
+    },
   data() {
     return {
+      activeTab: 'PGN',
       fen: "",
       svgBoard: "",
       pvLines: [],
@@ -136,16 +174,21 @@ export default {
       lastRenderedAt: 0,
 
       gameId: null,
+      games: [],
+      sessionGameIds: [],
+      isUploading: false,
+      uploadStatus: "",
     };
-  },
+    },
 
-  mounted() {
+    mounted() {
     document.title = "Chess Analyzer";
     // Set default starting position
     this.fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
     this.renderBoard();
+    this.fetchGames();
     window.addEventListener('keydown', this.handleKeyDown);
-  },
+    },
 
   beforeUnmount() {
     this.stopLiveAnalysis();
@@ -155,6 +198,9 @@ export default {
   computed: {
     canAnalyze() {
       return this.fen && this.fen.trim().length > 0;
+    },
+    sessionGames() {
+      return this.games.filter(g => this.sessionGameIds.includes(g.id));
     },
     isFenValid() {
       if (!this.fen) return false;
@@ -230,7 +276,60 @@ export default {
     }
   },
 
-  methods: {
+    methods: {
+    async fetchGames() {
+      try {
+        const response = await fetch(buildApiUrl('/games'));
+        const data = await response.json();
+        if (data.success) {
+          this.games = data.games;
+        }
+      } catch (err) {
+        console.error("Failed to fetch games:", err);
+      }
+    },
+
+    async loadGame(gameId) {
+      try {
+        const wasAnalyzing = !!this.socket;
+        if (this.socket) {
+          this.socket.close();
+          this.socket = null;
+        }
+        this.resetAnalysisState("");
+
+        this.uploadStatus = "Loading game moves...";
+        this.isUploading = true;
+
+        const response = await fetch(buildApiUrl(`/games/${gameId}/moves`));
+        const data = await response.json();
+        if (data.success) {
+          this.gameId = data.game_id;
+          this.pgnData = {
+            headers: data.headers || {},
+            total_moves: data.total_moves,
+            positions: data.positions,
+            movetext: data.movetext,
+            variation_tree: data.variation_tree,
+            mainline_node_ids: data.mainline_node_ids
+          };
+          this.currentMove = 0;
+          this.currentTreeNodeId = 0;
+          this.fen = this.pgnData.positions[0].fen;
+          await this.renderBoard();
+
+          if (wasAnalyzing) {
+            this.analyzeLive();
+          }
+        }
+      } catch (err) {
+        console.error("Failed to load game:", err);
+      } finally {
+        this.isUploading = false;
+        this.uploadStatus = "";
+      }
+    },
+
     getContinuationChild(node) {
       const variations = Array.isArray(node?.variations) ? node.variations : [];
       return variations.find((variation) => variation?.is_mainline) || variations[0] || null;
@@ -242,7 +341,7 @@ export default {
       const node = this.treeNodeMap[nodeId] || this.pgnData.variation_tree;
       if (!node?.fen) return;
 
-      this.stopLiveAnalysis();
+      const wasAnalyzing = !!this.socket;
       this.resetAnalysisState();
 
       this.currentTreeNodeId = nodeId;
@@ -256,6 +355,10 @@ export default {
 
       this.fen = node.fen;
       await this.renderBoard();
+
+      if (wasAnalyzing) {
+        this.sendAnalysisRequest();
+      }
     },
 
     convertToAlgebraic(uciMoves, fenString) {
@@ -424,6 +527,12 @@ export default {
         return;
       }
 
+      if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+        this.resetAnalysisState("Switching analysis...");
+        this.sendAnalysisRequest();
+        return;
+      }
+
       this.resetAnalysisState("Connecting to analysis service...");
       if (this.socket) this.socket.close();
 
@@ -432,13 +541,7 @@ export default {
 
       this.socket.onopen = () => {
         this.analysisStatusText = "Live analysis started";
-        this.socket.send(JSON.stringify({
-          fen: this.fen,
-          depth: LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH,
-          display_target_depth: LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH,
-          worker_target_depth: LIVE_ANALYSIS_WORKER_TARGET_DEPTH,
-          display_lag_depth: LIVE_ANALYSIS_DISPLAY_LAG_DEPTH,
-        }));
+        this.sendAnalysisRequest();
       };
       this.socket.onmessage = (event) => {
         this.handleAnalysisMessage(event.data);
@@ -457,6 +560,22 @@ export default {
         }
         this.socket = null;
       };
+    },
+
+    sendAnalysisRequest() {
+      if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+        console.warn("Cannot send analysis request: socket not open");
+        return;
+      }
+
+      this.socket.send(JSON.stringify({
+        fen: this.fen,
+        depth: 1, // Start with shallow depth for UI responsiveness
+        display_target_depth: 1,
+        worker_target_depth: LIVE_ANALYSIS_WORKER_TARGET_DEPTH,
+        display_lag_depth: 2, // Lag display behind worker by 2 depths for stability
+      }));
+      this.analysisStatusText = 'Live analysis updated';
     },
 
     stopLiveAnalysis() {
@@ -506,115 +625,49 @@ export default {
       }
     },
 
-    async uploadPGN() {
-      const fileInput = document.createElement("input");
-      fileInput.type = "file";
-      fileInput.accept = ".pgn";
-      fileInput.onchange = async () => {
-        const file = fileInput.files[0];
-        if (!file) return;
+    triggerUpload() {
+      this.$refs.fileInput.click();
+    },
 
-        const formData = new FormData();
-        formData.append("file", file);
+    async uploadPGN(event) {
+      const file = event.target.files[0];
+      if (!file) return;
 
-        try {
-          console.log(`Uploading PGN to: ${this.apiUrl("/games")}`);
+      const formData = new FormData();
+      formData.append('file', file);
 
-          const createRes = await fetch(this.apiUrl("/games"), {
-            method: "POST",
-            body: formData
-          });
+      this.isUploading = true;
+      this.uploadStatus = `Uploading and processing ${file.name}...`;
 
-          console.log("POST /games response status:", createRes.status);
+      try {
+        const response = await fetch(buildApiUrl('/games'), {
+          method: 'POST',
+          body: formData,
+        });
+        const data = await response.json();
+        if (data.success) {
+          const totalProcessed = data.total_games_created || 1;
+          this.uploadStatus = `Successfully processed ${totalProcessed} games!`;
+          // Brief pause to show success status before loading
+          await new Promise(r => setTimeout(r, 1000));
 
-          if (!createRes.ok) {
-            const errorMsg = await this.readErrorResponse(createRes, "Failed to upload PGN");
-            console.error("Upload error:", errorMsg);
-            alert(`Error: ${errorMsg}`);
-            return;
-          }
+          // Track session games - all_created_ids from response
+          const createdIds = data.all_created_ids || [data.id];
+          this.sessionGameIds = createdIds;
 
-          const created = await createRes.json();
-          console.log("POST /games payload:", created);
-
-          let pgnData;
-          this.gameId = created.id ?? null;
-
-          if (Array.isArray(created.positions)) {
-            pgnData = {
-              success: true,
-              headers: created.headers,
-              total_moves: created.total_moves,
-              positions: created.positions,
-              movetext: created.movetext || null,
-              variation_tree: created.variation_tree || null,
-              mainline_node_ids: Array.isArray(created.mainline_node_ids) ? created.mainline_node_ids : null,
-            };
-          } else if (this.gameId != null) {
-            const movesRes = await fetch(this.apiUrl(`/games/${this.gameId}/moves`));
-            console.log("GET /games/{id}/moves response status:", movesRes.status);
-
-            if (!movesRes.ok) {
-              const errorMsg = await this.readErrorResponse(movesRes, "Failed to load moves");
-              console.error("Load moves error:", errorMsg);
-              alert(`Error: ${errorMsg}`);
-              return;
-            }
-
-            const movesPayload = await movesRes.json();
-            console.log("Loaded positions:", movesPayload.total_moves);
-
-            pgnData = {
-              success: true,
-              headers: created.headers,
-              total_moves: movesPayload.total_moves,
-              positions: movesPayload.positions,
-              movetext: movesPayload.movetext || created.movetext || null,
-              variation_tree: movesPayload.variation_tree || created.variation_tree || null,
-              mainline_node_ids: Array.isArray(movesPayload.mainline_node_ids)
-                ? movesPayload.mainline_node_ids
-                : (Array.isArray(created.mainline_node_ids) ? created.mainline_node_ids : null),
-            };
-          } else {
-            throw new Error("Upload succeeded but no positions were returned.");
-          }
-
-          this.pgnData = pgnData;
-          this.currentMove = 0;
-          this.currentTreeNodeId = 0;
-          await this.showPosition(0);
-          console.log("PGN upload successful");
-
-          if (this.gameId != null) {
-            console.log("Starting batch analysis of all positions...");
-            try {
-              const analyzeRes = await fetch(this.apiUrl(`/games/${this.gameId}/analyze`), {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  depth: 15,
-                  time_limit: 1.0
-                })
-              });
-
-              if (analyzeRes.ok) {
-                const analyzeResult = await analyzeRes.json();
-                console.log("✓ Batch analysis complete:", analyzeResult);
-              } else {
-                const errorMsg = await this.readErrorResponse(analyzeRes, "Batch analysis skipped");
-                console.warn("Batch analysis skipped:", errorMsg);
-              }
-            } catch (analyzeErr) {
-              console.warn("Batch analysis not available:", this.stringifyError(analyzeErr, "Unknown error"));
-            }
-          }
-        } catch (error) {
-          const errorMsg = this.stringifyError(error, "Failed to upload PGN");
-          console.error("Upload exception:", error);
-          alert(`Error: ${errorMsg}`);
+          // Refresh games list and select the new game
+          await this.fetchGames();
+          this.loadGame(data.id);
         }
-      };
-      fileInput.click();
+      } catch (err) {
+        console.error("Upload failed", err);
+        this.uploadStatus = "Upload failed: " + (err.message || String(err));
+        // Keep status visible for a few seconds if it's an error
+        await new Promise(r => setTimeout(r, 3000));
+      } finally {
+        this.isUploading = false;
+        this.uploadStatus = "";
+      }
     },
 
     async showPosition(moveIndex) {
@@ -625,13 +678,17 @@ export default {
         return;
       }
 
-      this.stopLiveAnalysis();
+      const wasAnalyzing = !!this.socket;
       this.resetAnalysisState();
 
       this.currentTreeNodeId = this.getMainlineNodeId(moveIndex);
       const position = this.pgnData.positions[moveIndex];
       this.fen = position.fen;
       await this.renderBoard();
+
+      if (wasAnalyzing) {
+        this.sendAnalysisRequest();
+      }
     },
 
     async selectMove(moveIndex) {
@@ -721,6 +778,12 @@ export default {
       } else if (event.key === 'ArrowRight' && this.canGoNext) {
         event.preventDefault();
         this.nextMove();
+      } else if (event.key === 'ArrowUp' && this.canGoPrev) {
+        event.preventDefault();
+        this.prevMove();
+      } else if (event.key === 'ArrowDown' && this.canGoNext) {
+        event.preventDefault();
+        this.nextMove();
       } else if (event.key === 'Home' && this.currentMove !== 0) {
         event.preventDefault();
         this.firstMove();
@@ -771,15 +834,11 @@ export default {
     },
 
     formatEvaluationValue(scoreCp, scoreMate) {
-      const fenParts = (this.fen || "").trim().split(/\s+/);
-      const sideToMove = fenParts.length >= 2 ? fenParts[1] : 'w';
-      const sign = sideToMove === 'b' ? -1 : 1;
-
       if (scoreMate !== null && scoreMate !== undefined && scoreMate !== "") {
-        return `#${Number(scoreMate) * sign}`;
+        return `#${Number(scoreMate)}`;
       }
       if (scoreCp !== null && scoreCp !== undefined && scoreCp !== "") {
-        return (Number(scoreCp) * sign / 100).toFixed(2);
+        return (Number(scoreCp) / 100).toFixed(2);
       }
       return "--";
     },
@@ -867,17 +926,12 @@ export default {
             linesByDepth[depth] = [];
           }
           if (linesByDepth[depth].length < 3) {  // Keep all 3 lines
-            const fenParts = (this.fen || "").trim().split(/\s+/);
-            const sideToMove = fenParts.length >= 2 ? fenParts[1] : 'w';
-            const sign = sideToMove === 'b' ? -1 : 1;
-
             const rawScore = parseInt(scoreMatch[2], 10);
-            const normalizedScore = rawScore * sign;
 
             const evalValue =
               scoreMatch[1] === "cp"
-                ? (normalizedScore / 100).toFixed(2)
-                : `#${normalizedScore}`;
+                ? (rawScore / 100).toFixed(2)
+                : `#${rawScore}`;
 
             const pvUci = pvMatch ? pvMatch[1] : "";
             const pvAlgebraic = pvUci
@@ -918,6 +972,7 @@ export default {
 
 <style scoped>
 .analyzer {
+  position: relative;
   text-align: center;
   max-width: 1320px;
   width: 100%;
@@ -931,27 +986,24 @@ input, button {
 
 .layout {
   display: grid;
-  grid-template-columns: minmax(460px, 560px) minmax(370px, 485px);
-  grid-template-rows: auto auto;
+  grid-template-columns: 60px minmax(460px, 560px) minmax(370px, 485px);
   gap: 16px;
   align-items: start;
   justify-content: center;
   padding: 0 12px;
 }
 
-.top-left {
+.left-sidebar {
   grid-column: 1;
-  grid-row: 1;
-  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 10px;
 }
 
-.mid-left {
-  grid-column: 1;
-  grid-row: 2;
+.center-stage {
+  grid-column: 2;
   min-width: 0;
-}
-
-.board-area {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -959,24 +1011,79 @@ input, button {
 }
 
 .right-panel {
-  grid-column: 2;
-  grid-row: 1 / span 2;
+  grid-column: 3;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
-@media (max-width: 980px) {
+.tabs-header {
+  display: flex;
+  border-bottom: 2px solid #e0e0e0;
+}
+
+.tabs-header button {
+  background: none;
+  border: none;
+  padding: 8px 16px;
+  margin: 0;
+  cursor: pointer;
+  font-weight: bold;
+  color: #666;
+}
+
+.tabs-header button.active {
+  color: #2196F3;
+  border-bottom: 2px solid #2196F3;
+  margin-bottom: -2px;
+}
+
+.tabs-header button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.tab-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.empty-state {
+  padding: 30px 15px;
+  color: #888;
+  font-style: italic;
+  background: #fafafa;
+  border-radius: 8px;
+  border: 1px dashed #ddd;
+  margin-top: 10px;
+}
+
+.board-controls {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 5px;
+}
+
+@media (max-width: 1080px) {
+  .layout {
+    grid-template-columns: 60px 1fr;
+    grid-template-rows: auto auto;
+  }
+  .left-sidebar { grid-column: 1; grid-row: 1; }
+  .center-stage { grid-column: 2; grid-row: 1; }
+  .right-panel { grid-column: 1 / span 2; grid-row: 2; }
+}
+
+@media (max-width: 600px) {
   .layout {
     grid-template-columns: 1fr;
-    grid-template-rows: auto auto auto;
   }
-  .top-left,
-  .mid-left,
-  .right-panel {
-    grid-column: 1;
-  }
-  .top-left { grid-row: 1; }
-  .mid-left { grid-row: 2; }
-  .right-panel { grid-row: 3; }
+  .left-sidebar { grid-column: 1; flex-direction: row; justify-content: center; }
+  .center-stage { grid-column: 1; }
+  .right-panel { grid-column: 1; }
 }
 
 /* Live analysis card styling (kept here because LiveAnalysisPanel only defines inner scroll styles) */
@@ -995,6 +1102,36 @@ input, button {
   max-width: 100%;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
   border-radius: 4px;
+}
+
+.upload-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(255, 255, 255, 0.8);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+  backdrop-filter: blur(2px);
+}
+
+.upload-spinner {
+  border: 4px solid #f3f3f3;
+  border-top: 4px solid #3498db;
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  animation: spin 1s linear infinite;
+  margin-bottom: 1rem;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
 }
 
 .analysis-line {

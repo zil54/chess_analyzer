@@ -12,6 +12,7 @@
       @click="$emit('select-node', node.id)"
     >
       {{ formattedLabel }}
+      <span v-if="nagDisplay" class="move-nag">{{ nagDisplay }}</span>
     </button>
 
     <span v-if="renderSelf && node.comment" class="move-comment">
@@ -84,6 +85,10 @@ export default {
 
       return this.node.san;
     },
+    nagDisplay() {
+      const display = this.node?.nag_display;
+      return typeof display === 'string' && display.trim() ? display.trim() : '';
+    },
     variations() {
       return Array.isArray(this.node?.variations) ? this.node.variations : [];
     },
@@ -132,9 +137,19 @@ export default {
   color: #111827;
 }
 
+.move-nag {
+  margin-left: 4px;
+  color: #6b7280;
+  font-weight: 500;
+}
+
 .move-token.active {
   background: #dbeafe;
   color: #1d4ed8;
+}
+
+.move-token.active .move-nag {
+  color: inherit;
 }
 
 .move-comment {

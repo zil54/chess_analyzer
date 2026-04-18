@@ -10,26 +10,6 @@
         <span v-if="isVariationView" class="variation-badge">Viewing variation</span>
       </div>
     </div>
-
-    <div v-if="pgnData" class="pgn-controls">
-      <div class="move-controls">
-        <button @click="$emit('go-first')" :disabled="currentMove === 0">⏮ First</button>
-        <button @click="$emit('go-prev')" :disabled="!canGoPrev">◀ Prev</button>
-        <span>Ply {{ currentPly }} / {{ pgnData.total_moves }}</span>
-        <button
-          @click="$emit('go-next')"
-          :disabled="!canGoNext"
-        >
-          Next ▶
-        </button>
-        <button
-          @click="$emit('go-last')"
-          :disabled="currentMove === pgnData.total_moves"
-        >
-          Last ⏭
-        </button>
-      </div>
-    </div>
   </div>
 </template>
 
@@ -67,40 +47,41 @@ export default {
 }
 
 .pgn-header {
-  margin: 0 0 10px;
-  padding: 10px 12px;
-  background-color: #f8f9fa;
-  border-radius: 8px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  background-color: #f0f7ff;
+  border-left: 3px solid #2196F3;
+  border-radius: 4px;
+  font-size: 0.9rem;
 }
 
-.pgn-controls {
-  margin-top: 10px;
+.pgn-header h3 {
+  margin: 0 0 4px 0;
+  font-size: 0.95rem;
+  color: #1976D2;
+  font-weight: 600;
 }
 
-.move-controls {
-  margin: 0;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
+.pgn-header p {
+  margin: 3px 0;
+  font-size: 0.85rem;
+  color: #555;
 }
 
 .current-move {
-  margin-top: 6px;
-  font-size: 16px;
+  margin-top: 4px;
+  font-size: 0.9rem;
   color: #2c3e50;
 }
 
 .variation-badge {
   display: inline-block;
-  margin-left: 10px;
-  padding: 2px 8px;
-  border-radius: 999px;
+  margin-left: 8px;
+  padding: 2px 6px;
+  border-radius: 3px;
   background: #fff4e5;
   color: #9a6700;
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
 }
 </style>
