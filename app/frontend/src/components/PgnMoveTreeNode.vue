@@ -4,16 +4,18 @@
       { {{ node.starting_comment }} }
     </span>
 
-    <button
-      v-if="renderSelf && node.san"
-      type="button"
-      class="move-token"
-      :class="{ active: currentNodeId === node.id, mainline: node.is_mainline }"
-      @click="$emit('select-node', node.id)"
-    >
-      {{ formattedLabel }}
-      <span v-if="nagDisplay" class="move-nag">{{ nagDisplay }}</span>
-    </button>
+    <span v-if="renderSelf && node.san" class="move-item">
+      <button
+        type="button"
+        class="move-token"
+        :class="{ active: currentNodeId === node.id, mainline: node.is_mainline }"
+        @click="selectMove"
+      >
+        {{ formattedLabel }}
+        <span v-if="nagDisplay" class="move-nag">{{ nagDisplay }}</span>
+      </button>
+    </span>
+
 
     <span v-if="renderSelf && node.comment" class="move-comment">
       { {{ node.comment }} }
@@ -28,6 +30,8 @@
           :renderSelf="true"
           :renderContinuation="false"
           @select-node="$emit('select-node', $event)"
+          @update-node-nags="$emit('update-node-nags', $event)"
+          @update-node-comment="$emit('update-node-comment', $event)"
         />
       </span>
 
@@ -39,6 +43,8 @@
             :currentNodeId="currentNodeId"
             :isBranchStart="true"
             @select-node="$emit('select-node', $event)"
+            @update-node-nags="$emit('update-node-nags', $event)"
+            @update-node-comment="$emit('update-node-comment', $event)"
           />
           <span class="variation-paren">)</span>
         </span>
@@ -52,6 +58,8 @@
           :renderSelf="false"
           :renderContinuation="true"
           @select-node="$emit('select-node', $event)"
+          @update-node-nags="$emit('update-node-nags', $event)"
+          @update-node-comment="$emit('update-node-comment', $event)"
         />
       </span>
     </template>
@@ -69,6 +77,44 @@ export default {
     renderContinuation: { type: Boolean, default: true },
   },
   emits: ['select-node'],
+  data() {
+    return {
+      allNags: [
+        [1, '!', 'Good move'],
+        [2, '?', 'Bad move'],
+        [3, '!!', 'Excellent move'],
+        [4, '??', 'Blunder'],
+        [5, '!?', 'Interesting'],
+        [6, '?!', 'Dubious'],
+        [10, '=', 'Equal'],
+        [14, '+=', 'Slightly better for White'],
+        [15, '=+', 'Slightly better for Black'],
+        [16, '+/-', 'Better for White'],
+        [17, '-/+', 'Better for Black'],
+        [18, '+-', 'Winning for White'],
+        [19, '-+', 'Winning for Black'],
+        [12, '∞', 'Unclear'],
+        [130, 'Z', 'Zugzwang'],
+        [138, '⇄', 'Counterplay'],
+        [32, '⟳', 'Repetition'],
+        [36, '↑', 'Initiative'],
+        [40, '→', 'Attack'],
+        [22, '+/−', 'Advantage/Disadvantage'],
+        [23, '−/+', 'Disadvantage/Advantage'],
+        [131, '+/=', 'Compensation(W)'],
+        [133, '=/+', 'Compensation(B)']
+      ]
+    };
+  },
+  watch: {
+    node: {
+      handler(newNode) {
+        // Watchers kept minimal for simple selection
+      },
+      immediate: true,
+      deep: true
+    }
+  },
   computed: {
     formattedLabel() {
       if (!this.node?.san) {
@@ -99,31 +145,41 @@ export default {
       return this.variations.filter((variation) => variation && variation.id !== this.mainlineChild?.id);
     },
   },
+  methods: {
+    selectMove() {
+      this.$emit('select-node', this.node.id);
+    }
+  }
 };
 </script>
 
 <style scoped>
 .move-sequence {
   display: inline;
-  line-height: 1.9;
+  line-height: 1.6;
+}
+
+.move-item {
+  display: inline-block;
+  margin-right: 2px;
 }
 
 .move-token,
 .move-comment,
 .variation-block {
-  margin-right: 6px;
+  margin-right: 0;
 }
 
 .move-token {
   display: inline-block;
-  padding: 1px 4px;
+  padding: 1px 3px;
   border: none;
-  border-radius: 4px;
+  border-radius: 3px;
   background: transparent;
   color: #1f2328;
   cursor: pointer;
-  font-size: 13px;
-  line-height: 1.4;
+  font-size: 15px;
+  line-height: 1.3;
   font-weight: 400;
 }
 
@@ -138,9 +194,10 @@ export default {
 }
 
 .move-nag {
-  margin-left: 4px;
+  margin-left: 2px;
   color: #6b7280;
   font-weight: 500;
+  font-size: 1em;
 }
 
 .move-token.active {
@@ -154,7 +211,8 @@ export default {
 
 .move-comment {
   color: #57606a;
-  font-size: 12px;
+  font-size: 13px;
+  margin-left: 2px;
 }
 
 .move-comment-start {
@@ -168,6 +226,7 @@ export default {
 .variation-paren {
   color: #6e7781;
   font-weight: 600;
+  margin: 0 1px;
 }
 
 .continuation {

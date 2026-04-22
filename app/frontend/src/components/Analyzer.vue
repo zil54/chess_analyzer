@@ -36,13 +36,6 @@
           <button @click="nextMove" :disabled="!canGoNext">Next &gt;</button>
           <button @click="lastMove" :disabled="currentMove === pgnData.total_moves">Last &gt;|</button>
         </div>
-
-        <LiveAnalysisPanel
-          :lines="currentAnalysisLines"
-          :statusText="analysisStatusText"
-          :isAnalyzingFurther="analysisFurtherActive"
-          :activityText="analysisFurtherText"
-        />
       </div>
 
       <!-- RIGHT SECTION: Tabs -->
@@ -58,6 +51,8 @@
           >
             Games ({{sessionGames.length}})
           </button>
+          <button :class="{active: activeTab === 'Game Notes'}" @click="activeTab = 'Game Notes'" :disabled="!pgnData">Game Notes</button>
+          <button :class="{active: activeTab === 'Analysis'}" @click="activeTab = 'Analysis'">Analysis</button>
           <button :class="{active: activeTab === 'Quiz'}" @click="activeTab = 'Quiz'" disabled>Quiz</button>
         </div>
 
@@ -70,6 +65,7 @@
               :pgnData="pgnData"
               :currentMove="currentMove"
               :currentPosition="currentPosition"
+              :currentTreeNode="currentTreeNode"
             />
             <PgnMovesList
               :pgnData="pgnData"
@@ -90,6 +86,23 @@
             :games="sessionGames"
             :initialGameId="gameId"
             @select-game="loadGame"
+          />
+        </div>
+
+        <div class="tab-content" v-show="activeTab === 'Game Notes' && pgnData">
+          <GameNotes
+            :currentTreeNode="currentTreeNode"
+            @update-node-nags="updateNodeNags"
+            @update-node-comment="updateNodeComment"
+          />
+        </div>
+
+        <div class="tab-content" v-show="activeTab === 'Analysis'">
+          <LiveAnalysisPanel
+            :lines="currentAnalysisLines"
+            :statusText="analysisStatusText"
+            :isAnalyzingFurther="analysisFurtherActive"
+            :activityText="analysisFurtherText"
           />
         </div>
 
@@ -114,6 +127,7 @@ import PgnMovesList from './PgnMovesList.vue';
 import BoardDisplay from './BoardDisplay.vue';
 import LiveAnalysisPanel from './LiveAnalysisPanel.vue';
 import GameSelector from './GameSelector.vue';
+import GameNotes from './GameNotes.vue';
 
 const DEFAULT_BACKEND_PORT = '8000';
 
@@ -155,7 +169,8 @@ export default {
     PgnMovesList,
     BoardDisplay,
     LiveAnalysisPanel,
-    GameSelector
+    GameSelector,
+    GameNotes
     },
   data() {
     return {
@@ -530,6 +545,16 @@ export default {
 
       if (!san) return;
 
+      // Check if this move already exists in variations
+      if (parentNode.variations && Array.isArray(parentNode.variations)) {
+        const existingMove = parentNode.variations.find(v => v.san === san && v.fen === moveInfo.fen);
+        if (existingMove) {
+          // Move already exists, just navigate to it
+          await this.selectTreeNode(existingMove.id);
+          return;
+        }
+      }
+
       const newPly = (parentNode.ply || 0) + 1;
       const newColor = newPly % 2 === 1 ? 'w' : 'b';
       const newMoveNumber = Math.ceil(newPly / 2);
@@ -562,12 +587,57 @@ export default {
       await this.selectTreeNode(newId);
     },
 
+    updateNodeNags({ nodeId, nags }) {
+      if (!this.pgnData?.variation_tree) return;
+
+      const node = this.treeNodeMap[nodeId];
+      if (node) {
+        node.nags = nags;
+        node.nag_symbols = nags.map(this.nagToSymbol).filter(Boolean);
+        node.nag_display = node.nag_symbols.length > 0 ? node.nag_symbols.join(' ') : null;
+        // Mark as unsaved whenever NAGs change
+        this.hasUnsavedChanges = true;
+        if (!this.unsavedNodeIds.includes(nodeId)) {
+          this.unsavedNodeIds.push(nodeId);
+        }
+      }
+    },
+
+    updateNodeComment({ nodeId, comment }) {
+      if (!this.pgnData?.variation_tree) return;
+
+      const node = this.treeNodeMap[nodeId];
+      if (node) {
+        node.comment = comment || null;
+        // Mark as unsaved whenever comment changes
+        this.hasUnsavedChanges = true;
+        if (!this.unsavedNodeIds.includes(nodeId)) {
+          this.unsavedNodeIds.push(nodeId);
+        }
+      }
+    },
+
+    nagToSymbol(nag) {
+      const NAG_DISPLAY_MAP = {
+        1: "!", 2: "?", 3: "!!", 4: "??", 5: "!?", 6: "?!",
+        10: "=", 11: "=", 12: "∞", 13: "∞", 14: "+=", 15: "=+",
+        16: "+/-", 17: "-/+", 18: "+-", 19: "-+", 20: "+-", 21: "-+",
+        22: "⩲", 23: "⩱", 24: "±", 25: "∓", 26: "+-", 27: "-+", 32: "⟳",
+        36: "↑", 40: "→", 44: "⇄", 130: "Z", 131: "⩲", 132: "⟳", 133: "⩱",
+        136: "↑", 138: "⇄", 140: "∆", 142: "⌓",
+        145: "RR", 146: "N"
+      };
+      return NAG_DISPLAY_MAP[nag] || `$${nag}`;
+    },
+
     saveChanges() {
       // Logic for saving custom variations to the backend can go here.
       // For now, commit them locally.
       this.hasUnsavedChanges = false;
       this.unsavedNodeIds = [];
       this.backupTreeNodeId = null;
+      // Deselect current node to close inline editor
+      this.currentTreeNodeId = 0;
     },
 
     discardChanges() {
@@ -588,6 +658,8 @@ export default {
       this.hasUnsavedChanges = false;
       this.unsavedNodeIds = [];
       this.backupTreeNodeId = null;
+      // Deselect current node to close inline editor
+      this.currentTreeNodeId = 0;
     },
 
     formatAnalysisStatus(payload, sourceLabel = "Analysis") {
@@ -650,6 +722,7 @@ export default {
 
       if (this.socket && this.socket.readyState === WebSocket.OPEN) {
         this.resetAnalysisState("Switching analysis...");
+        this.activeTab = 'Analysis';
         this.sendAnalysisRequest();
         return;
       }
@@ -660,10 +733,11 @@ export default {
       const socketUrl = this.wsUrl("/ws/analyze");
       this.socket = new WebSocket(socketUrl);
 
-      this.socket.onopen = () => {
-        this.analysisStatusText = "Live analysis started";
-        this.sendAnalysisRequest();
-      };
+       this.socket.onopen = () => {
+         this.analysisStatusText = "Live analysis started";
+         this.activeTab = 'Analysis';
+         this.sendAnalysisRequest();
+       };
       this.socket.onmessage = (event) => {
         this.handleAnalysisMessage(event.data);
       };

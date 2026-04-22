@@ -25,28 +25,29 @@ export default {
   },
   data() {
     return {
-      boardApi: null
-    };
-  },
-  computed: {
-    boardConfig() {
-      return {
+      boardApi: null,
+      boardConfig: {
         fen: this.fen,
         orientation: this.flipped ? 'black' : 'white',
         coordinates: true,
         animation: {
           enabled: true,
-          duration: 200
+          duration: 100
         },
         movable: {
           color: 'both',
           free: false
         }
-      };
-    }
+      }
+    };
   },
   watch: {
+    fen(newFen) {
+      // Update FEN in board config carefully to avoid resetting board
+      this.boardConfig.fen = newFen;
+    },
     flipped(newVal) {
+      this.boardConfig.orientation = newVal ? 'black' : 'white';
       if (this.boardApi && typeof this.boardApi.toggleOrientation === 'function') {
         this.boardApi.toggleOrientation();
       }
