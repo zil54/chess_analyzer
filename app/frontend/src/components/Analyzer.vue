@@ -52,18 +52,24 @@
       <!-- RIGHT SECTION: Tabs -->
       <aside class="right-panel">
         <div class="tabs-header">
-          <button :class="{active: activeTab === 'PGN'}" @click="activeTab = 'PGN'">
+          <button :class="{active: activeTab === 'PGN'}" @click="activeTab = 'PGN'" :disabled="isQuizActive">
             PGN<span v-if="hasUnsavedChanges"> *</span>
           </button>
           <button
             :class="{active: activeTab === 'Games'}"
             @click="activeTab = 'Games'"
-            :disabled="sessionGames.length === 0"
+            :disabled="sessionGames.length === 0 || isQuizActive"
           >
             Games ({{sessionGames.length}})
           </button>
-          <button :class="{active: activeTab === 'Analysis'}" @click="activeTab = 'Analysis'">Analysis</button>
-          <button :class="{active: activeTab === 'Quiz'}" @click="activeTab = 'Quiz'" disabled>Quiz</button>
+          <button :class="{active: activeTab === 'Analysis'}" @click="activeTab = 'Analysis'" :disabled="isQuizActive">Analysis</button>
+          <button
+            :class="{active: activeTab === 'Quiz'}"
+            @click="activeTab = 'Quiz'"
+            :disabled="!quizPositions.length"
+          >
+            Quiz
+          </button>
         </div>
 
         <div class="tab-content" v-show="activeTab === 'PGN'">
@@ -90,6 +96,20 @@
               <button @click="saveChanges" class="btn-save">Save</button>
               <button @click="discardChanges" class="btn-discard">Cancel</button>
             </div>
+            <div v-if="pgnData" class="pgn-quiz-action">
+              <button
+                @click="initiateQuiz"
+                class="btn-start-quiz"
+                :disabled="quizPositions.length === 0"
+              >
+                <span v-if="quizPositions.length > 0">
+                  🎯 Start Critical Position Quiz ({{ quizPositions.length }})
+                </span>
+                <span v-else>
+                  ❌ No Critical Positions (add {CPosition} in comments)
+                </span>
+              </button>
+            </div>
           </template>
         </div>
 
@@ -111,7 +131,15 @@
         </div>
 
         <div class="tab-content" v-show="activeTab === 'Quiz'">
-          <p>Quiz mode coming soon...</p>
+          <QuizTab
+            ref="quizTab"
+            :positions="quizPositions"
+            :gameId="gameId"
+            @start-quiz="handleStartQuiz"
+            @stop-quiz="handleStopQuiz"
+            @show-position="handleQuizShowPosition"
+            @quiz-finished="handleQuizFinished"
+          />
         </div>
       </aside>
     </div>
@@ -136,6 +164,7 @@ import PgnMovesList from './PgnMovesList.vue';
 import BoardDisplay from './BoardDisplay.vue';
 import LiveAnalysisPanel from './LiveAnalysisPanel.vue';
 import GameSelector from './GameSelector.vue';
+import QuizTab from './QuizTab.vue';
 
 const DEFAULT_BACKEND_PORT = '8000';
 const BOARD_APPEARANCE_STORAGE_KEY = 'chess-analyzer-board-appearance';
@@ -180,6 +209,7 @@ export default {
     BoardDisplay,
     LiveAnalysisPanel,
     GameSelector,
+    QuizTab,
   },
   data() {
     return {
@@ -224,6 +254,9 @@ export default {
       hasUnsavedChanges: false,
       unsavedNodeIds: [],
       backupTreeNodeId: null,
+
+      quizPositions: [],
+      isQuizActive: false,
     };
   },
 
@@ -244,7 +277,7 @@ export default {
 
   computed: {
     canAnalyze() {
-      return this.fen && this.fen.trim().length > 0;
+      return this.fen && this.fen.trim().length > 0 && !this.isQuizActive;
     },
     sessionGames() {
       return this.games.filter(g => this.sessionGameIds.includes(g.id));
@@ -308,6 +341,7 @@ export default {
       return map;
     },
     canGoPrev() {
+      if (this.isQuizActive) return false;
       if (!this.pgnData) return false;
       if (this.pgnData?.variation_tree) {
         return this.currentTreeNodeId !== 0 && Number.isInteger(this.treeParentMap[this.currentTreeNodeId]);
@@ -315,6 +349,7 @@ export default {
       return this.currentMove > 0;
     },
     canGoNext() {
+      if (this.isQuizActive) return false;
       if (!this.pgnData) return false;
       if (this.pgnData?.variation_tree) {
         return Boolean(this.getContinuationChild(this.currentTreeNode));
@@ -403,6 +438,11 @@ export default {
           this.fen = this.pgnData.positions[0].fen;
           await this.renderBoard();
 
+          await this.$nextTick();
+          this.refreshQuizPositions();
+
+          this.fetchQuizData(gameId);
+
           if (wasAnalyzing) {
             this.analyzeLive();
           }
@@ -413,6 +453,132 @@ export default {
         this.isUploading = false;
         this.uploadStatus = "";
       }
+    },
+
+    async fetchQuizData(gameId) {
+      const localQuizPositions = this.buildQuizPositionsFromCurrentGame();
+      this.quizPositions = localQuizPositions;
+      if (!gameId) {
+        return;
+      }
+
+      try {
+        const response = await fetch(buildApiUrl(`/games/${gameId}/quiz`));
+        const data = await response.json();
+        if (data.success && Array.isArray(data.quiz_positions) && data.quiz_positions.length >= localQuizPositions.length) {
+          this.quizPositions = data.quiz_positions || [];
+        }
+      } catch (err) {
+        console.error("Failed to fetch quiz data:", err);
+      }
+    },
+
+    commentHasCriticalPosition(comment) {
+      return typeof comment === 'string' && comment.toLowerCase().includes('cposition');
+    },
+
+    commentMarksCurrentMoveAsCritical(comment) {
+      if (typeof comment !== 'string') return false;
+      const normalized = comment.toLowerCase();
+      return normalized.includes('already critical move')
+        || normalized.includes('was already critical')
+        || normalized.includes('this was already critical');
+    },
+
+    normalizeQuizColor(color) {
+      return String(color || '').toUpperCase() === 'B' ? 'B' : 'W';
+    },
+
+    buildQuizPositionsFromCurrentGame() {
+      if (!this.pgnData) {
+        return [];
+      }
+
+      const positions = Array.isArray(this.pgnData.positions) ? this.pgnData.positions : [];
+      if (positions.length <= 1) {
+        return [];
+      }
+
+      if (this.pgnData?.variation_tree && Array.isArray(this.pgnData.mainline_node_ids) && this.pgnData.mainline_node_ids.length > 1) {
+        const quizPositions = [];
+        for (let ply = 1; ply < this.pgnData.mainline_node_ids.length; ply += 1) {
+          const nodeId = this.pgnData.mainline_node_ids[ply];
+          const node = this.treeNodeMap[nodeId];
+          if (!node) continue;
+
+          const isCriticalPosition = Boolean(node.cp_tag) || this.commentHasCriticalPosition(node.comment);
+          if (!isCriticalPosition) continue;
+
+          const usesCurrentMove = this.commentMarksCurrentMoveAsCritical(node.comment);
+          const targetPly = usesCurrentMove ? ply : ply + 1;
+          const targetNodeId = this.pgnData.mainline_node_ids[targetPly];
+          const targetNode = this.treeNodeMap[targetNodeId];
+          const fenBefore = usesCurrentMove ? positions[ply - 1]?.fen : positions[ply]?.fen;
+          if (!targetNode || !fenBefore) continue;
+
+          quizPositions.push({
+            ply: targetPly,
+            fen_before: fenBefore,
+            expected_move_san: targetNode.san,
+            color: this.normalizeQuizColor(targetNode.color),
+            comment: node.comment || null,
+          });
+        }
+        return quizPositions;
+      }
+
+      const quizPositions = [];
+      for (let ply = 1; ply < positions.length; ply += 1) {
+        const position = positions[ply];
+        if (!position) continue;
+        const isCriticalPosition = Boolean(position.cp_tag) || this.commentHasCriticalPosition(position.comment);
+        if (!isCriticalPosition) continue;
+
+        const usesCurrentMove = this.commentMarksCurrentMoveAsCritical(position.comment);
+        const targetPly = usesCurrentMove ? ply : ply + 1;
+        const targetPosition = positions[targetPly];
+        const fenBefore = usesCurrentMove ? positions[ply - 1]?.fen : positions[ply]?.fen;
+        if (!targetPosition || !fenBefore) continue;
+
+        quizPositions.push({
+          ply: targetPly,
+          fen_before: fenBefore,
+          expected_move_san: targetPosition.san,
+          color: this.normalizeQuizColor(targetPosition.color),
+          comment: position.comment || null,
+        });
+      }
+      return quizPositions;
+    },
+
+    refreshQuizPositions() {
+      this.quizPositions = this.buildQuizPositionsFromCurrentGame();
+      if (!this.quizPositions.length && this.activeTab === 'Quiz') {
+        this.activeTab = 'PGN';
+      }
+    },
+
+    initiateQuiz() {
+      this.activeTab = 'Quiz';
+    },
+
+    handleStartQuiz() {
+      this.isQuizActive = true;
+      this.stopLiveAnalysis();
+    },
+
+    handleStopQuiz() {
+      this.isQuizActive = false;
+    },
+
+    handleQuizShowPosition(fen) {
+      this.fen = fen;
+    },
+
+    handleQuizFinished(stats) {
+      this.handleStopQuiz();
+      alert(`Quiz Finished! Score: ${stats.completed}/${stats.total}`);
+      this.activeTab = 'PGN';
     },
 
     getContinuationChild(node) {
@@ -573,6 +739,28 @@ export default {
     },
 
     async onUserMove(moveInfo) {
+      if (this.isQuizActive) {
+        // Find SAN of the move
+        let san = "";
+        try {
+          const chess = new Chess(this.fen);
+          const moveResult = chess.move({
+            from: moveInfo.from,
+            to: moveInfo.to,
+            promotion: moveInfo.promotion || 'q'
+          });
+          if (moveResult) {
+            san = moveResult.san;
+            this.fen = moveResult.fen; // Show the move on board
+            if (this.$refs.quizTab) {
+              this.$refs.quizTab.handleUserMove(san);
+            }
+          }
+        } catch (err) {
+          console.warn("Invalid quiz move", err);
+        }
+        return;
+      }
       if (!this.pgnData || !this.pgnData.variation_tree) {
         this.fen = moveInfo.fen;
         if (this.socket) this.analyzeLive();
@@ -595,13 +783,19 @@ export default {
       let san = moveInfo.san;
       if (!san) {
         try {
-          const chess = new Chess(parentFen);
+          const chess = new Chess(this.fen);
           const moveResult = chess.move({
             from: moveInfo.from,
             to: moveInfo.to,
             promotion: moveInfo.promotion || 'q'
           });
-          if (moveResult) san = moveResult.san;
+          if (moveResult) {
+            san = moveResult.san;
+            this.fen = moveResult.fen; // Show the move on board
+            if (this.$refs.quizTab) {
+              this.$refs.quizTab.handleUserMove(san);
+            }
+          }
         } catch (err) {
           console.warn("Invalid user move recalculation", err);
           san = null;
@@ -684,11 +878,13 @@ export default {
       const node = this.treeNodeMap[nodeId];
       if (node) {
         node.comment = comment || null;
+        node.cp_tag = this.commentHasCriticalPosition(node.comment);
         // Mark as unsaved whenever comment changes
         this.hasUnsavedChanges = true;
         if (!this.unsavedNodeIds.includes(nodeId)) {
           this.unsavedNodeIds.push(nodeId);
         }
+        this.refreshQuizPositions();
       }
     },
 
@@ -705,12 +901,51 @@ export default {
       return NAG_DISPLAY_MAP[nag] || `$${nag}`;
     },
 
-    saveChanges() {
-      // Logic for saving custom variations to the backend can go here.
-      // For now, commit them locally.
+    async saveChanges() {
+      if (this.gameId && this.pgnData?.variation_tree && Array.isArray(this.pgnData.mainline_node_ids)) {
+        const annotations = this.pgnData.mainline_node_ids
+          .slice(1)
+          .map((nodeId, index) => {
+            const ply = index + 1;
+            const node = this.treeNodeMap[nodeId];
+            if (!node) return null;
+            return {
+              ply,
+              comment: node.comment || null,
+              cp_tag: Boolean(node.cp_tag) || this.commentHasCriticalPosition(node.comment),
+            };
+          })
+          .filter(Boolean);
+
+        try {
+          const response = await fetch(buildApiUrl(`/games/${this.gameId}/annotations`), {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ annotations }),
+          });
+
+          if (!response.ok) {
+            const detail = await this.readErrorResponse(response, 'Failed to save changes');
+            throw new Error(detail);
+          }
+
+          const data = await response.json();
+          if (!data.success) {
+            throw new Error('Failed to save changes');
+          }
+        } catch (error) {
+          console.error('Failed to persist annotations:', error);
+          alert(`Save failed: ${this.stringifyError(error, 'Unknown error')}`);
+          return;
+        }
+      }
+
       this.hasUnsavedChanges = false;
       this.unsavedNodeIds = [];
       this.backupTreeNodeId = null;
+      this.refreshQuizPositions();
       // Deselect current node to close inline editor
       this.currentTreeNodeId = 0;
     },
@@ -733,6 +968,7 @@ export default {
       this.hasUnsavedChanges = false;
       this.unsavedNodeIds = [];
       this.backupTreeNodeId = null;
+      this.refreshQuizPositions();
       // Deselect current node to close inline editor
       this.currentTreeNodeId = 0;
     },
@@ -1502,6 +1738,39 @@ input, button {
   background-color: #7f8c8d;
 }
 
-/* ...existing code... */
+.pgn-quiz-action {
+  display: flex;
+  justify-content: center;
+  margin-top: 15px;
+}
+
+.btn-start-quiz {
+  background-color: #e91e63;
+  color: white;
+  border: none;
+  padding: 10px 20px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: bold;
+  font-size: 14px;
+  transition: background-color 0.2s;
+}
+
+.btn-start-quiz:hover:not(:disabled) {
+  background-color: #c2185b;
+}
+
+.btn-start-quiz:active:not(:disabled) {
+  background-color: #ad1457;
+}
+
+.btn-start-quiz:disabled {
+  background-color: #ccc;
+  color: #666;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+
 </style>
 

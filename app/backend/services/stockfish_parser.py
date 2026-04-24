@@ -16,11 +16,12 @@ def parse_stockfish_line(fen: str, line: str) -> dict[str, object]:
     result: dict[str, object] = {"fen": fen}
 
     try:
-        # Determine side to move from FEN to normalize score to White's perspective
-        # FEN format: [board] [side to move] [castling] [ep] [halfmove] [fullmove]
+        # UCI scores are from the side-to-move perspective.
+        # Normalize them to White's perspective so the same advantage keeps the same sign
+        # across consecutive plies.
         fen_parts = fen.split()
-        is_black_to_move = len(fen_parts) > 1 and fen_parts[1] == 'b'
-        score_multiplier = -1 if is_black_to_move else 1
+        side_to_move = fen_parts[1] if len(fen_parts) > 1 else 'w'
+        score_multiplier = -1 if side_to_move == 'b' else 1
 
         depth_match = _DEPTH_RE.search(line)
         if depth_match:

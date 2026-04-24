@@ -228,6 +228,41 @@ async def get_moves(game_id: int) -> list[dict]:
     return rows or []
 
 
+async def update_move_annotations(game_id: int, annotations: list[dict[str, Any]]) -> int:
+    """Persist mainline move comments / critical-position tags for a game."""
+    if not annotations:
+        return 0
+
+    records = [
+        (
+            item.get("comment"),
+            bool(item.get("cp_tag", False)),
+            game_id,
+            item["ply"],
+        )
+        for item in annotations
+        if item and item.get("ply") is not None
+    ]
+
+    if not records:
+        return 0
+
+    async with await get_connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                """
+                UPDATE public.moves
+                SET comment = %s,
+                    cp_tag = %s
+                WHERE game_id = %s AND ply = %s
+                """,
+                records,
+            )
+        await conn.commit()
+
+    return len(records)
+
+
 async def get_game_raw_pgn(game_id: int) -> Optional[str]:
     async with await get_connection() as conn:
         async with conn.cursor() as cur:

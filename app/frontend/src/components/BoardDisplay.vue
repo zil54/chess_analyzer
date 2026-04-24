@@ -44,8 +44,11 @@ export default {
   },
   watch: {
     fen(newFen) {
-      // Update FEN in board config carefully to avoid resetting board
+      // Keep both the reactive config and the underlying board game state in sync.
       this.boardConfig.fen = newFen;
+      if (this.boardApi && typeof this.boardApi.setPosition === 'function' && newFen) {
+        this.boardApi.setPosition(newFen);
+      }
     },
     flipped(newVal) {
       this.boardConfig.orientation = newVal ? 'black' : 'white';
