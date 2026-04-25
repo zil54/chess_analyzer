@@ -16,6 +16,13 @@ def parse_stockfish_line(fen: str, line: str) -> dict[str, object]:
     result: dict[str, object] = {"fen": fen}
 
     try:
+        # UCI scores are from the side-to-move perspective.
+        # Normalize them to White's perspective so the same advantage keeps the same sign
+        # across consecutive plies.
+        fen_parts = fen.split()
+        side_to_move = fen_parts[1] if len(fen_parts) > 1 else 'w'
+        score_multiplier = -1 if side_to_move == 'b' else 1
+
         depth_match = _DEPTH_RE.search(line)
         if depth_match:
             result["depth"] = int(depth_match.group(1))
@@ -27,9 +34,11 @@ def parse_stockfish_line(fen: str, line: str) -> dict[str, object]:
         cp_match = _CP_RE.search(line)
         mate_match = _MATE_RE.search(line)
         if cp_match:
-            result["score_cp"] = int(cp_match.group(1))
+            raw_cp = int(cp_match.group(1))
+            result["score_cp"] = raw_cp * score_multiplier
         elif mate_match:
-            result["score_mate"] = int(mate_match.group(1))
+            raw_mate = int(mate_match.group(1))
+            result["score_mate"] = raw_mate * score_multiplier
 
         pv_match = _PV_RE.search(line)
         if pv_match:

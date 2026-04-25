@@ -56,32 +56,36 @@ export default {
   border-radius: 8px;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
   text-align: left;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .moves-list-title {
-  margin-bottom: 8px;
+  margin-bottom: 6px;
   font-weight: 600;
   color: #2c3e50;
+  font-size: 0.9rem;
 }
 
 .moves-section-label {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   color: #57606a;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .tree-block,
 .movetext-block {
-  padding: 10px;
-  max-height: 340px;
+  padding: 10px 12px;
+  max-height: 420px;
   overflow-y: auto;
+  overflow-x: visible;
   background: #fff;
   border: 1px solid #d0d7de;
   border-radius: 6px;
   font-family: ui-monospace, SFMono-Regular, SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: 15px;
+  line-height: 1.6;
   color: #1f2328;
 }
 

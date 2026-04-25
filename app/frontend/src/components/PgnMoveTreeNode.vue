@@ -4,17 +4,20 @@
       { {{ node.starting_comment }} }
     </span>
 
-    <button
-      v-if="renderSelf && node.san"
-      type="button"
-      class="move-token"
-      :class="{ active: currentNodeId === node.id, mainline: node.is_mainline }"
-      @click="$emit('select-node', node.id)"
-    >
-      {{ formattedLabel }}
-    </button>
+    <span v-if="renderSelf && node.san" class="move-item" :class="{ 'variation-context': inVariation }">
+      <button
+        type="button"
+        class="move-token"
+        :class="{ active: currentNodeId === node.id, mainline: node.is_mainline, 'variation-move': inVariation }"
+        @click="selectMove"
+      >
+        {{ formattedLabel }}
+        <span v-if="nagDisplay" class="move-nag">{{ nagDisplay }}</span>
+      </button>
+    </span>
 
-    <span v-if="renderSelf && node.comment" class="move-comment">
+
+    <span v-if="renderSelf && node.comment" class="move-comment" :class="{ 'variation-comment': inVariation }">
       { {{ node.comment }} }
     </span>
 
@@ -26,6 +29,7 @@
           :isBranchStart="false"
           :renderSelf="true"
           :renderContinuation="false"
+          :inVariation="inVariation"
           @select-node="$emit('select-node', $event)"
         />
       </span>
@@ -37,6 +41,7 @@
             :node="variation"
             :currentNodeId="currentNodeId"
             :isBranchStart="true"
+            :inVariation="true"
             @select-node="$emit('select-node', $event)"
           />
           <span class="variation-paren">)</span>
@@ -50,6 +55,7 @@
           :isBranchStart="false"
           :renderSelf="false"
           :renderContinuation="true"
+          :inVariation="inVariation"
           @select-node="$emit('select-node', $event)"
         />
       </span>
@@ -64,6 +70,7 @@ export default {
     node: { type: Object, required: true },
     currentNodeId: { type: Number, default: 0 },
     isBranchStart: { type: Boolean, default: false },
+    inVariation: { type: Boolean, default: false },
     renderSelf: { type: Boolean, default: true },
     renderContinuation: { type: Boolean, default: true },
   },
@@ -84,6 +91,10 @@ export default {
 
       return this.node.san;
     },
+    nagDisplay() {
+      const display = this.node?.nag_display;
+      return typeof display === 'string' && display.trim() ? display.trim() : '';
+    },
     variations() {
       return Array.isArray(this.node?.variations) ? this.node.variations : [];
     },
@@ -94,32 +105,46 @@ export default {
       return this.variations.filter((variation) => variation && variation.id !== this.mainlineChild?.id);
     },
   },
+  methods: {
+    selectMove() {
+      this.$emit('select-node', this.node.id);
+    }
+  }
 };
 </script>
 
 <style scoped>
 .move-sequence {
   display: inline;
-  line-height: 1.9;
+  line-height: 1.6;
+}
+
+.move-item {
+  display: inline-block;
+  margin-right: 2px;
 }
 
 .move-token,
 .move-comment,
 .variation-block {
-  margin-right: 6px;
+  margin-right: 0;
 }
 
 .move-token {
   display: inline-block;
-  padding: 1px 4px;
+  padding: 1px 3px;
   border: none;
-  border-radius: 4px;
+  border-radius: 3px;
   background: transparent;
   color: #1f2328;
   cursor: pointer;
-  font-size: 13px;
-  line-height: 1.4;
+  font-size: 14px;
+  line-height: 1.3;
   font-weight: 400;
+}
+
+.move-token.variation-move {
+  font-size: 12px;
 }
 
 .move-token:hover {
@@ -132,14 +157,30 @@ export default {
   color: #111827;
 }
 
+.move-nag {
+  margin-left: 2px;
+  color: #6b7280;
+  font-weight: 500;
+  font-size: 1em;
+}
+
 .move-token.active {
   background: #dbeafe;
   color: #1d4ed8;
 }
 
+.move-token.active .move-nag {
+  color: inherit;
+}
+
 .move-comment {
   color: #57606a;
   font-size: 12px;
+  margin-left: 2px;
+}
+
+.move-comment.variation-comment {
+  font-size: 10.5px;
 }
 
 .move-comment-start {
@@ -153,6 +194,8 @@ export default {
 .variation-paren {
   color: #6e7781;
   font-weight: 600;
+  margin: 0 1px;
+  font-size: 12px;
 }
 
 .continuation {

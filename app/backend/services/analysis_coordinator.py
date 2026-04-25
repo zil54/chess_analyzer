@@ -53,12 +53,66 @@ class AnalysisCoordinator:
 
     async def handle_websocket(self, websocket: WebSocket) -> None:
         await websocket.accept()
+        request_queue: asyncio.Queue[AnalysisRequest] = asyncio.Queue()
+
+        async def listen_for_requests():
+            try:
+                while True:
+                    payload = await websocket.receive_text()
+                    try:
+                        request = self.parse_request_payload(payload)
+                        chess.Board(request.fen)
+                        await request_queue.put(request)
+                    except ValueError as exc:
+                        await self._send_error(websocket, str(exc))
+                    except Exception as exc:
+                        logger.error("Error parsing websocket request: %s", exc)
+                        await self._send_error(websocket, f"Invalid request: {exc}")
+            except WebSocketDisconnect:
+                pass
+            except Exception as exc:
+                logger.error("WebSocket reader exception: %s", exc)
+
+        reader_task = asyncio.create_task(listen_for_requests())
+        stream_task: asyncio.Task[None] | None = None
 
         try:
-            request_payload = await websocket.receive_text()
-            request = self.parse_request_payload(request_payload)
-            chess.Board(request.fen)
+            while not reader_task.done():
+                # Wait for a new request or check if current stream finished
+                try:
+                    # If we don't have a stream, wait indefinitely for a request
+                    if stream_task is None or stream_task.done():
+                        request = await asyncio.wait_for(request_queue.get(), timeout=1.0)
+                    else:
+                        # If a stream is running, wait for a NEW request that would override it
+                        request = await asyncio.wait_for(request_queue.get(), timeout=0.1)
+                except (asyncio.TimeoutError, TimeoutError):
+                    continue
 
+                # If we got here, we have a NEW request. Cancel old stream if any.
+                if stream_task and not stream_task.done():
+                    stream_task.cancel()
+                    try:
+                        await stream_task
+                    except asyncio.CancelledError:
+                        pass
+
+                # Start new stream for the new request
+                stream_task = asyncio.create_task(self._process_single_request(websocket, request))
+
+        except WebSocketDisconnect:
+            logger.info("WebSocket disconnected during analysis stream")
+        finally:
+            reader_task.cancel()
+            if stream_task:
+                stream_task.cancel()
+            try:
+                await asyncio.gather(reader_task, stream_task, return_exceptions=True) if stream_task else await asyncio.gather(reader_task, return_exceptions=True)
+            except Exception:
+                pass
+
+    async def _process_single_request(self, websocket: WebSocket, request: AnalysisRequest) -> None:
+        try:
             if not self._db_enabled():
                 await self._stream_direct_engine(websocket, request)
                 return
@@ -74,17 +128,21 @@ class AnalysisCoordinator:
                 ) or latest_snapshot
             cached_display_depth = self._snapshot_depth(display_snapshot)
             request = self._with_effective_worker_target(request, latest_depth)
-            if latest_snapshot and latest_depth >= MAX_ANALYSIS_DEPTH:
+
+            # Immediate delivery of DB cache
+            if latest_snapshot:
                 await websocket.send_json(
                     self.build_snapshot_event(
                         display_snapshot,
                         request,
                         source="database",
                         worker_depth=latest_depth,
-                        worker_running=False,
+                        worker_running=await self._job_is_running(request.fen),
                         cached_depth=cached_display_depth,
                     )
                 )
+
+            if latest_snapshot and latest_depth >= MAX_ANALYSIS_DEPTH:
                 await websocket.send_json(
                     self.build_status_event(
                         request,
@@ -99,19 +157,7 @@ class AnalysisCoordinator:
                 return
 
             started = await self.ensure_analysis(request.fen, request.worker_target_depth)
-            latest_depth = self._snapshot_depth(latest_snapshot)
-            if latest_snapshot:
-                await websocket.send_json(
-                    self.build_snapshot_event(
-                        display_snapshot,
-                        request,
-                        source="database",
-                        worker_depth=latest_depth,
-                        worker_running=True,
-                        cached_depth=cached_display_depth,
-                    )
-                )
-
+            worker_running = await self._job_is_running(request.fen)
             status = "analysis_started" if started else "analysis_running"
             status_message = None
             if latest_snapshot:
@@ -126,18 +172,16 @@ class AnalysisCoordinator:
                     status_message,
                     display_depth=cached_display_depth if latest_snapshot else None,
                     worker_depth=latest_depth if latest_snapshot else None,
-                    worker_running=True,
+                    worker_running=worker_running,
                     cached_depth=cached_display_depth if latest_snapshot else None,
                 )
             )
             await self._stream_database_updates(websocket, request, display_snapshot, cached_display_depth)
-        except WebSocketDisconnect:
-            logger.info("WebSocket disconnected during analysis stream")
-        except ValueError as exc:
-            await self._send_error(websocket, str(exc))
-        except Exception as exc:  # pragma: no cover - defensive integration path
-            logger.error("Unexpected websocket analysis error: %s", exc, exc_info=True)
-            await self._send_error(websocket, f"Analysis failed: {exc}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("Error processing request: %s", exc, exc_info=True)
+            await self._send_error(websocket, f"Request failed: {exc}")
 
     async def shutdown(self) -> None:
         async with self._jobs_lock:

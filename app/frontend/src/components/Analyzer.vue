@@ -1,23 +1,12 @@
 <template>
   <div class="analyzer">
+    <div v-if="isUploading" class="upload-overlay">
+      <div class="upload-spinner"></div>
+      <p>{{ uploadStatus }}</p>
+    </div>
     <div class="layout">
-      <div class="top-left">
-        <PgnPanel
-          :pgnData="pgnData"
-          :currentMove="currentMove"
-          :currentPosition="currentPosition"
-          :currentTreeNode="currentTreeNode"
-          :canGoPrev="canGoPrev"
-          :canGoNext="canGoNext"
-          @go-first="firstMove"
-          @go-prev="prevMove"
-          @go-next="nextMove"
-          @go-last="lastMove"
-          @select-move="selectMove"
-        />
-      </div>
-
-      <div class="mid-left board-area">
+      <!-- LEFT SECTION: Vertically stacked options -->
+      <aside class="left-sidebar">
         <FenControls
           :fen="fen"
           :isFenValid="isFenValid"
@@ -27,30 +16,133 @@
           @render-board="renderBoard"
           @start-analysis="analyzeLive"
           @stop-analysis="stopLiveAnalysis"
-          @upload-pgn="uploadPGN"
+          @upload-pgn="triggerUpload"
           @flip-board="flipBoard"
+          @open-board-settings="toggleBoardSettings"
         />
+        <div v-if="isBoardSettingsOpen" class="board-settings-anchor">
+          <BoardSettingsPanel
+            :boardThemes="boardThemes"
+            :selectedBoardThemeId="selectedBoardThemeId"
+            @close="isBoardSettingsOpen = false"
+            @select-board-theme="applyBoardTheme"
+          />
+        </div>
+        <input type="file" ref="fileInput" @change="uploadPGN" accept=".pgn" style="display: none" />
+      </aside>
 
+      <!-- CENTER SECTION: Board, navigation arrows, analysis -->
+      <div class="center-stage board-area">
         <BoardDisplay
-          :svgBoard="svgBoard"
+          ref="boardDisplay"
+          :fen="fen"
+          :flipped="boardFlipped"
+          :boardTheme="selectedBoardTheme"
+          @user-move="onUserMove"
         />
 
-        <LiveAnalysisPanel
-          :lines="currentAnalysisLines"
-          :statusText="analysisStatusText"
-          :isAnalyzingFurther="analysisFurtherActive"
-          :activityText="analysisFurtherText"
-        />
+        <div class="board-controls" v-if="pgnData">
+          <button @click="firstMove" :disabled="currentMove === 0">|&lt; First</button>
+          <button @click="prevMove" :disabled="!canGoPrev">&lt; Prev</button>
+          <button @click="nextMove" :disabled="!canGoNext">Next &gt;</button>
+          <button @click="lastMove" :disabled="currentMove === pgnData.total_moves">Last &gt;|</button>
+        </div>
       </div>
 
+      <!-- RIGHT SECTION: Tabs -->
       <aside class="right-panel">
-        <PgnMovesList
-          :pgnData="pgnData"
-          :currentMove="currentMove"
-          :currentNodeId="currentTreeNodeId"
-          @select-move="selectMove"
-          @select-tree-node="selectTreeNode"
-        />
+        <div class="tabs-header">
+          <button :class="{active: activeTab === 'PGN'}" @click="activeTab = 'PGN'" :disabled="isQuizActive">
+            PGN<span v-if="hasUnsavedChanges"> *</span>
+          </button>
+          <button
+            :class="{active: activeTab === 'Games'}"
+            @click="activeTab = 'Games'"
+            :disabled="sessionGames.length === 0 || isQuizActive"
+          >
+            Games ({{sessionGames.length}})
+          </button>
+          <button :class="{active: activeTab === 'Analysis'}" @click="activeTab = 'Analysis'" :disabled="isQuizActive">Analysis</button>
+          <button
+            :class="{active: activeTab === 'Quiz'}"
+            @click="activeTab = 'Quiz'"
+            :disabled="!quizPositions.length"
+          >
+            Quiz
+          </button>
+        </div>
+
+        <div class="tab-content" v-show="activeTab === 'PGN'">
+          <div v-if="!pgnData" class="empty-state">
+            <p>Upload a PGN file or choose a game to see its moves here.</p>
+          </div>
+          <template v-else>
+            <PgnPanel
+              :pgnData="pgnData"
+              :currentMove="currentMove"
+              :currentPosition="currentPosition"
+              :currentTreeNode="currentTreeNode"
+              @update-node-nags="updateNodeNags"
+              @update-node-comment="updateNodeComment"
+            />
+            <PgnMovesList
+              :pgnData="pgnData"
+              :currentMove="currentMove"
+              :currentNodeId="currentTreeNodeId"
+              @select-move="selectMove"
+              @select-tree-node="selectTreeNode"
+            />
+            <div v-if="hasUnsavedChanges" class="pgn-save-actions">
+              <button @click="saveChanges" class="btn-save">Save</button>
+              <button @click="discardChanges" class="btn-discard">Cancel</button>
+            </div>
+            <div v-if="pgnData" class="pgn-quiz-action">
+              <button
+                @click="initiateQuiz"
+                class="btn-start-quiz"
+                :disabled="quizPositions.length === 0"
+              >
+                <span v-if="quizPositions.length > 0">
+                  🎯 Start Critical Position Quiz ({{ quizPositions.length }})
+                </span>
+                <span v-else>
+                  ❌ No Critical Positions (add {CPosition} in comments)
+                </span>
+              </button>
+            </div>
+          </template>
+        </div>
+
+        <div class="tab-content" v-show="activeTab === 'Games' && sessionGames.length > 0">
+          <GameSelector
+            :games="sessionGames"
+            :initialGameId="gameId"
+            @select-game="loadGame"
+          />
+        </div>
+
+        <div class="tab-content" v-show="activeTab === 'Analysis'">
+          <LiveAnalysisPanel
+            :lines="currentAnalysisLines"
+            :statusText="analysisStatusText"
+            :isAnalyzingFurther="analysisFurtherActive"
+            :activityText="analysisFurtherText"
+          />
+        </div>
+
+        <div class="tab-content" v-show="activeTab === 'Quiz'">
+          <QuizTab
+            ref="quizTab"
+            :positions="quizPositions"
+            :gameId="gameId"
+            :apiBaseUrl="getApiBaseUrl()"
+            @start-quiz="handleStartQuiz"
+            @stop-quiz="handleStopQuiz"
+            @show-position="handleQuizShowPosition"
+            @quiz-finished="handleQuizFinished"
+            @jump-to-ply="jumpToQuizPly"
+          />
+        </div>
       </aside>
     </div>
   </div>
@@ -63,13 +155,21 @@ import {
   LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH,
   LIVE_ANALYSIS_WORKER_TARGET_DEPTH,
 } from '../config/liveAnalysis';
+import {
+  BOARD_THEMES,
+  DEFAULT_BOARD_THEME_ID,
+} from '../config/boardAppearance';
 import FenControls from './FenControls.vue';
+import BoardSettingsPanel from './BoardSettingsPanel.vue';
 import PgnPanel from './PgnPanel.vue';
 import PgnMovesList from './PgnMovesList.vue';
 import BoardDisplay from './BoardDisplay.vue';
 import LiveAnalysisPanel from './LiveAnalysisPanel.vue';
+import GameSelector from './GameSelector.vue';
+import QuizTab from './QuizTab.vue';
 
 const DEFAULT_BACKEND_PORT = '8000';
+const BOARD_APPEARANCE_STORAGE_KEY = 'chess-analyzer-board-appearance';
 
 function normalizeBaseUrl(url) {
   return String(url || '').trim().replace(/\/+$/, '');
@@ -105,13 +205,17 @@ export default {
   name: 'Analyzer',
   components: {
     FenControls,
+    BoardSettingsPanel,
     PgnPanel,
     PgnMovesList,
     BoardDisplay,
-    LiveAnalysisPanel
+    LiveAnalysisPanel,
+    GameSelector,
+    QuizTab,
   },
   data() {
     return {
+      activeTab: 'PGN',
       fen: "",
       svgBoard: "",
       pvLines: [],
@@ -126,26 +230,47 @@ export default {
       analysisFurtherActive: false,
       analysisFurtherText: "",
       boardFlipped: false,
+      boardThemes: BOARD_THEMES,
+      selectedBoardThemeId: DEFAULT_BOARD_THEME_ID,
+      isBoardSettingsOpen: false,
       waitingForDepthOne: false,
 
       // UI smoothing: keep a depth block steady for a short time before updating
       analysisHoldMs: 1200,
+      analysisRenderMinMs: 500,
+      analysisStatusMinMs: 350,
       pendingAnalysisLines: null,
       pendingDepth: null,
       pendingTimer: null,
       lastRenderedAt: 0,
+      lastStatusRenderedAt: 0,
+      lastStatusText: "",
+      analysisPvCache: Object.create(null),
 
       gameId: null,
+      games: [],
+      sessionGameIds: [],
+      isUploading: false,
+      uploadStatus: "",
+
+      hasUnsavedChanges: false,
+      unsavedNodeIds: [],
+      backupTreeNodeId: null,
+
+       quizPositions: [],
+       isQuizActive: false,
     };
   },
 
   mounted() {
     document.title = "Chess Analyzer";
+    this.restoreBoardAppearance();
     // Set default starting position
     this.fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
     this.renderBoard();
+    this.fetchGames();
     window.addEventListener('keydown', this.handleKeyDown);
-  },
+    },
 
   beforeUnmount() {
     this.stopLiveAnalysis();
@@ -154,7 +279,10 @@ export default {
 
   computed: {
     canAnalyze() {
-      return this.fen && this.fen.trim().length > 0;
+      return this.fen && this.fen.trim().length > 0 && !this.isQuizActive;
+    },
+    sessionGames() {
+      return this.games.filter(g => this.sessionGameIds.includes(g.id));
     },
     isFenValid() {
       if (!this.fen) return false;
@@ -215,6 +343,7 @@ export default {
       return map;
     },
     canGoPrev() {
+      if (this.isQuizActive) return false;
       if (!this.pgnData) return false;
       if (this.pgnData?.variation_tree) {
         return this.currentTreeNodeId !== 0 && Number.isInteger(this.treeParentMap[this.currentTreeNodeId]);
@@ -222,15 +351,272 @@ export default {
       return this.currentMove > 0;
     },
     canGoNext() {
+      if (this.isQuizActive) return false;
       if (!this.pgnData) return false;
       if (this.pgnData?.variation_tree) {
         return Boolean(this.getContinuationChild(this.currentTreeNode));
       }
       return this.currentMove < this.pgnData.total_moves;
+    },
+    selectedBoardTheme() {
+      return this.boardThemes.find((theme) => theme.id === this.selectedBoardThemeId) || this.boardThemes[0];
     }
   },
 
-  methods: {
+    methods: {
+    // Expose the API base URL so child components (QuizTab) can make direct backend calls
+    getApiBaseUrl() {
+      return getApiBaseUrl();
+    },
+
+    toggleBoardSettings() {
+      this.isBoardSettingsOpen = !this.isBoardSettingsOpen;
+    },
+
+    applyBoardTheme(themeId) {
+      if (!this.boardThemes.some((theme) => theme.id === themeId)) return;
+      this.selectedBoardThemeId = themeId;
+      this.persistBoardAppearance();
+    },
+
+    restoreBoardAppearance() {
+      if (typeof window === 'undefined') return;
+      try {
+        const raw = window.localStorage.getItem(BOARD_APPEARANCE_STORAGE_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (parsed?.boardThemeId && this.boardThemes.some((theme) => theme.id === parsed.boardThemeId)) {
+          this.selectedBoardThemeId = parsed.boardThemeId;
+        }
+      } catch (error) {
+        console.warn('Failed to restore board appearance', error);
+      }
+    },
+
+    persistBoardAppearance() {
+      if (typeof window === 'undefined') return;
+      try {
+        window.localStorage.setItem(BOARD_APPEARANCE_STORAGE_KEY, JSON.stringify({
+          boardThemeId: this.selectedBoardThemeId,
+        }));
+      } catch (error) {
+        console.warn('Failed to persist board appearance', error);
+      }
+    },
+
+    async fetchGames() {
+      try {
+        const response = await fetch(buildApiUrl('/games'));
+        const data = await response.json();
+        if (data.success) {
+          this.games = data.games;
+        }
+      } catch (err) {
+        console.error("Failed to fetch games:", err);
+      }
+    },
+
+    async loadGame(gameId) {
+      try {
+        const wasAnalyzing = !!this.socket;
+        if (this.socket) {
+          this.socket.close();
+          this.socket = null;
+        }
+        this.resetAnalysisState("");
+
+        this.uploadStatus = "Loading game moves...";
+        this.isUploading = true;
+
+        const response = await fetch(buildApiUrl(`/games/${gameId}/moves`));
+        const data = await response.json();
+        if (data.success) {
+          this.gameId = data.game_id;
+          this.pgnData = {
+            headers: data.headers || {},
+            total_moves: data.total_moves,
+            positions: data.positions,
+            movetext: data.movetext,
+            variation_tree: data.variation_tree,
+            mainline_node_ids: data.mainline_node_ids
+          };
+          this.currentMove = 0;
+          this.currentTreeNodeId = 0;
+          this.fen = this.pgnData.positions[0].fen;
+          await this.renderBoard();
+
+          await this.$nextTick();
+          this.refreshQuizPositions();
+
+          this.fetchQuizData(gameId);
+
+          if (wasAnalyzing) {
+            this.analyzeLive();
+          }
+        }
+      } catch (err) {
+        console.error("Failed to load game:", err);
+      } finally {
+        this.isUploading = false;
+        this.uploadStatus = "";
+      }
+    },
+
+    async fetchQuizData(gameId) {
+      const localQuizPositions = this.buildQuizPositionsFromCurrentGame();
+      this.quizPositions = localQuizPositions;
+      if (!gameId) {
+        return;
+      }
+
+      try {
+        const response = await fetch(buildApiUrl(`/games/${gameId}/quiz`));
+        const data = await response.json();
+        if (data.success && Array.isArray(data.quiz_positions) && data.quiz_positions.length >= localQuizPositions.length) {
+          this.quizPositions = data.quiz_positions || [];
+        }
+      } catch (err) {
+        console.error("Failed to fetch quiz data:", err);
+      }
+    },
+
+    commentHasCriticalPosition(comment) {
+      return typeof comment === 'string' && comment.toLowerCase().includes('cposition');
+    },
+
+    commentMarksCurrentMoveAsCritical(comment) {
+      if (typeof comment !== 'string') return false;
+      const normalized = comment.toLowerCase();
+      return normalized.includes('already critical move')
+        || normalized.includes('was already critical')
+        || normalized.includes('this was already critical');
+    },
+
+    normalizeQuizColor(color) {
+      return String(color || '').toUpperCase() === 'B' ? 'B' : 'W';
+    },
+
+    buildQuizPositionsFromCurrentGame() {
+      if (!this.pgnData) {
+        return [];
+      }
+
+      const positions = Array.isArray(this.pgnData.positions) ? this.pgnData.positions : [];
+      if (positions.length <= 1) {
+        return [];
+      }
+
+      if (this.pgnData?.variation_tree && Array.isArray(this.pgnData.mainline_node_ids) && this.pgnData.mainline_node_ids.length > 1) {
+        const quizPositions = [];
+        for (let ply = 1; ply < this.pgnData.mainline_node_ids.length; ply += 1) {
+          const nodeId = this.pgnData.mainline_node_ids[ply];
+          const node = this.treeNodeMap[nodeId];
+          if (!node) continue;
+
+          const isCriticalPosition = Boolean(node.cp_tag) || this.commentHasCriticalPosition(node.comment);
+          if (!isCriticalPosition) continue;
+
+          const usesCurrentMove = this.commentMarksCurrentMoveAsCritical(node.comment);
+          const targetPly = usesCurrentMove ? ply : ply + 1;
+          const targetNodeId = this.pgnData.mainline_node_ids[targetPly];
+          const targetNode = this.treeNodeMap[targetNodeId];
+          const fenBefore = usesCurrentMove ? positions[ply - 1]?.fen : positions[ply]?.fen;
+          if (!targetNode || !fenBefore) continue;
+
+          quizPositions.push({
+            ply: targetPly,
+            fen_before: fenBefore,
+            expected_move_san: targetNode.san,
+            color: this.normalizeQuizColor(targetNode.color),
+            comment: node.comment || null,
+          });
+        }
+        return quizPositions;
+      }
+
+      const quizPositions = [];
+      for (let ply = 1; ply < positions.length; ply += 1) {
+        const position = positions[ply];
+        if (!position) continue;
+        const isCriticalPosition = Boolean(position.cp_tag) || this.commentHasCriticalPosition(position.comment);
+        if (!isCriticalPosition) continue;
+
+        const usesCurrentMove = this.commentMarksCurrentMoveAsCritical(position.comment);
+        const targetPly = usesCurrentMove ? ply : ply + 1;
+        const targetPosition = positions[targetPly];
+        const fenBefore = usesCurrentMove ? positions[ply - 1]?.fen : positions[ply]?.fen;
+        if (!targetPosition || !fenBefore) continue;
+
+        quizPositions.push({
+          ply: targetPly,
+          fen_before: fenBefore,
+          expected_move_san: targetPosition.san,
+          color: this.normalizeQuizColor(targetPosition.color),
+          comment: position.comment || null,
+        });
+      }
+      return quizPositions;
+    },
+
+    refreshQuizPositions() {
+      this.quizPositions = this.buildQuizPositionsFromCurrentGame();
+      if (!this.quizPositions.length && this.activeTab === 'Quiz') {
+        this.activeTab = 'PGN';
+      }
+    },
+
+    initiateQuiz() {
+      this.activeTab = 'Quiz';
+    },
+
+    handleStartQuiz() {
+      this.isQuizActive = true;
+      this.stopLiveAnalysis();
+    },
+
+    handleStopQuiz() {
+      this.isQuizActive = false;
+    },
+
+    handleQuizShowPosition(fen) {
+      this.fen = fen;
+    },
+
+    handleQuizFinished(stats) {
+      // Quiz analysis is now handled entirely inside QuizTab.
+      // Just mark quiz as no longer blocking the rest of the UI.
+      this.isQuizActive = false;
+    },
+
+    async jumpToQuizPly(plyTarget) {
+      if (!this.pgnData) return;
+      // Switch to PGN tab first and wait for render
+      this.activeTab = 'PGN';
+      await this.$nextTick();
+
+      let targetNodeId = null;
+
+      // Primary path: ply stored in quiz positions is an index into mainline_node_ids
+      const nodeIds = this.pgnData.mainline_node_ids;
+      if (Array.isArray(nodeIds) && plyTarget >= 0 && plyTarget < nodeIds.length) {
+        targetNodeId = nodeIds[plyTarget];
+      }
+
+      // Fallback: search every tree node for a matching .ply property
+      if (targetNodeId == null) {
+        for (const node of Object.values(this.treeNodeMap)) {
+          if (node && node.ply === plyTarget) {
+            targetNodeId = node.id;
+            break;
+          }
+        }
+      }
+
+      if (targetNodeId != null) {
+        await this.selectTreeNode(targetNodeId);
+      }
+    },
+
     getContinuationChild(node) {
       const variations = Array.isArray(node?.variations) ? node.variations : [];
       return variations.find((variation) => variation?.is_mainline) || variations[0] || null;
@@ -242,20 +628,28 @@ export default {
       const node = this.treeNodeMap[nodeId] || this.pgnData.variation_tree;
       if (!node?.fen) return;
 
-      this.stopLiveAnalysis();
+      const wasAnalyzing = !!this.socket;
       this.resetAnalysisState();
 
       this.currentTreeNodeId = nodeId;
+
+      // Attempt to resolve mainline index if present to keep board controls aligned
       if (Number.isInteger(preferredMoveIndex)) {
         this.currentMove = preferredMoveIndex;
       } else if (Number.isInteger(node.mainline_index)) {
         this.currentMove = node.mainline_index;
       } else if (Number.isInteger(node.anchor_mainline_index)) {
         this.currentMove = node.anchor_mainline_index;
+      } else if (Number.isInteger(node.ply)) {
+        this.currentMove = node.ply;
       }
 
       this.fen = node.fen;
       await this.renderBoard();
+
+      if (wasAnalyzing) {
+        this.sendAnalysisRequest();
+      }
     },
 
     convertToAlgebraic(uciMoves, fenString) {
@@ -358,12 +752,260 @@ export default {
     },
 
     async renderBoard() {
-      const res = await fetch(this.apiUrl("/svg"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fen: this.fen, flip: this.boardFlipped })
-      });
-      this.svgBoard = await res.text();
+      // Replaced by vue3-chessboard rendering automatically
+    },
+
+    generateNewNodeId() {
+      let maxId = 0;
+      const root = this.pgnData?.variation_tree;
+      if (!root) return 1;
+
+      const stack = [root];
+      while (stack.length) {
+        const node = stack.pop();
+        if (node && Number.isInteger(node.id) && node.id > maxId) {
+          maxId = node.id;
+        }
+        const vars = Array.isArray(node.variations) ? node.variations : [];
+        for (let i = 0; i < vars.length; i++) {
+          stack.push(vars[i]);
+        }
+      }
+      return maxId + 1;
+    },
+
+    async onUserMove(moveInfo) {
+      if (this.isQuizActive) {
+        const quizTab = this.$refs.quizTab;
+        const fenBefore = this.fen;
+        try {
+          const chess = new Chess(fenBefore);
+          const moveResult = chess.move({
+            from: moveInfo.from,
+            to: moveInfo.to,
+            promotion: moveInfo.promotion || 'q'
+          });
+          if (moveResult) {
+            this.fen = moveResult.fen;  // Show the move on board — stays there, quiz gives feedback
+            if (quizTab) {
+              quizTab.handleUserMove(moveResult.san);
+            }
+          }
+        } catch (err) {
+          console.warn('Invalid quiz move', err);
+        }
+        return;
+      }
+      if (!this.pgnData || !this.pgnData.variation_tree) {
+        this.fen = moveInfo.fen;
+        if (this.socket) this.analyzeLive();
+        return;
+      }
+
+      const currentFen = typeof this.fen === 'string' ? this.fen : '';
+      const matchedNode = Object.values(this.treeNodeMap).find((node) => node?.fen === currentFen) || null;
+      const parentNode = (this.currentTreeNode?.fen === currentFen ? this.currentTreeNode : matchedNode) || this.currentTreeNode || this.pgnData.variation_tree;
+      const parentNodeId = Number.isInteger(parentNode.id) ? parentNode.id : 0;
+      const parentFen = parentNode?.fen || currentFen;
+      const fenParts = typeof parentFen === 'string' ? parentFen.trim().split(/\s+/) : [];
+      const parentTurn = fenParts[1] === 'b' ? 'b' : 'w';
+      const parentFullmove = parseInt(fenParts[5], 10) || 1;
+      const parentMainlineIndex = Number.isInteger(parentNode.mainline_index)
+        ? parentNode.mainline_index
+        : (Number.isInteger(parentNode.anchor_mainline_index) ? parentNode.anchor_mainline_index : this.currentMove);
+
+      // Extract algebraic notation
+      let san = moveInfo.san;
+      if (!san) {
+        try {
+          const chess = new Chess(this.fen);
+          const moveResult = chess.move({
+            from: moveInfo.from,
+            to: moveInfo.to,
+            promotion: moveInfo.promotion || 'q'
+          });
+          if (moveResult) {
+            san = moveResult.san;
+            this.fen = moveResult.fen; // Show the move on board
+            if (this.$refs.quizTab) {
+              this.$refs.quizTab.handleUserMove(san);
+            }
+          }
+        } catch (err) {
+          console.warn("Invalid user move recalculation", err);
+          san = null;
+        }
+      }
+
+      if (!san) return;
+
+      // Check if this move already exists in variations
+      if (parentNode.variations && Array.isArray(parentNode.variations)) {
+        const existingMove = parentNode.variations.find(v => v.san === san && v.fen === moveInfo.fen);
+        if (existingMove) {
+          // Move already exists, just navigate to it
+          await this.selectTreeNode(existingMove.id);
+          return;
+        }
+      }
+
+      const newPly = Number.isInteger(parentNode.ply)
+        ? parentNode.ply + 1
+        : ((parentFullmove - 1) * 2) + (parentTurn === 'w' ? 1 : 2);
+      const newColor = parentTurn;
+      const newMoveNumber = parentFullmove;
+
+      const newId = this.generateNewNodeId();
+      const newNode = {
+        id: newId,
+        san: san,
+        move: moveInfo.promotion ? `${moveInfo.from}${moveInfo.to}${moveInfo.promotion}` : `${moveInfo.from}${moveInfo.to}`,
+        fen: moveInfo.fen,
+        ply: newPly,
+        color: newColor,
+        move_number: newMoveNumber,
+        comment: null,
+        starting_comment: null,
+        nags: [],
+        nag_symbols: [],
+        nag_display: null,
+        is_mainline: false,
+        mainline_index: null,
+        anchor_mainline_index: parentMainlineIndex,
+        variations: []
+      };
+
+      if (!parentNode.variations) parentNode.variations = [];
+      parentNode.variations.push(newNode);
+
+      if (!this.hasUnsavedChanges) {
+        this.hasUnsavedChanges = true;
+        this.backupTreeNodeId = parentNodeId;
+        this.unsavedNodeIds = [];
+      }
+      this.unsavedNodeIds.push(newId);
+
+      // Force Vue to recognize deep reactivity by replacing array
+      parentNode.variations = [...parentNode.variations];
+
+      await this.selectTreeNode(newId);
+    },
+
+    updateNodeNags({ nodeId, nags }) {
+      if (!this.pgnData?.variation_tree) return;
+
+      const node = this.treeNodeMap[nodeId];
+      if (node) {
+        node.nags = nags;
+        node.nag_symbols = nags.map(this.nagToSymbol).filter(Boolean);
+        node.nag_display = node.nag_symbols.length > 0 ? node.nag_symbols.join(' ') : null;
+        // Mark as unsaved whenever NAGs change
+        this.hasUnsavedChanges = true;
+        if (!this.unsavedNodeIds.includes(nodeId)) {
+          this.unsavedNodeIds.push(nodeId);
+        }
+      }
+    },
+
+    updateNodeComment({ nodeId, comment }) {
+      if (!this.pgnData?.variation_tree) return;
+
+      const node = this.treeNodeMap[nodeId];
+      if (node) {
+        node.comment = comment || null;
+        node.cp_tag = this.commentHasCriticalPosition(node.comment);
+        // Mark as unsaved whenever comment changes
+        this.hasUnsavedChanges = true;
+        if (!this.unsavedNodeIds.includes(nodeId)) {
+          this.unsavedNodeIds.push(nodeId);
+        }
+        this.refreshQuizPositions();
+      }
+    },
+
+    nagToSymbol(nag) {
+      const NAG_DISPLAY_MAP = {
+        1: "!", 2: "?", 3: "!!", 4: "??", 5: "!?", 6: "?!",
+        10: "=", 11: "=", 12: "∞", 13: "∞", 14: "+=", 15: "=+",
+        16: "+/-", 17: "-/+", 18: "+-", 19: "-+", 20: "+-", 21: "-+",
+        22: "⩲", 23: "⩱", 24: "±", 25: "∓", 26: "+-", 27: "-+", 32: "⟳",
+        36: "↑", 40: "→", 44: "⇄", 130: "Z", 131: "⩲", 132: "⟳", 133: "⩱",
+        136: "↑", 138: "⇄", 140: "∆", 142: "⌓",
+        145: "RR", 146: "N"
+      };
+      return NAG_DISPLAY_MAP[nag] || `$${nag}`;
+    },
+
+    async saveChanges() {
+      if (this.gameId && this.pgnData?.variation_tree && Array.isArray(this.pgnData.mainline_node_ids)) {
+        const annotations = this.pgnData.mainline_node_ids
+          .slice(1)
+          .map((nodeId, index) => {
+            const ply = index + 1;
+            const node = this.treeNodeMap[nodeId];
+            if (!node) return null;
+            return {
+              ply,
+              comment: node.comment || null,
+              cp_tag: Boolean(node.cp_tag) || this.commentHasCriticalPosition(node.comment),
+            };
+          })
+          .filter(Boolean);
+
+        try {
+          const response = await fetch(buildApiUrl(`/games/${this.gameId}/annotations`), {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ annotations }),
+          });
+
+          if (!response.ok) {
+            const detail = await this.readErrorResponse(response, 'Failed to save changes');
+            throw new Error(detail);
+          }
+
+          const data = await response.json();
+          if (!data.success) {
+            throw new Error('Failed to save changes');
+          }
+        } catch (error) {
+          console.error('Failed to persist annotations:', error);
+          alert(`Save failed: ${this.stringifyError(error, 'Unknown error')}`);
+          return;
+        }
+      }
+
+      this.hasUnsavedChanges = false;
+      this.unsavedNodeIds = [];
+      this.backupTreeNodeId = null;
+      this.refreshQuizPositions();
+      // Deselect current node to close inline editor
+      this.currentTreeNodeId = 0;
+    },
+
+    discardChanges() {
+      if (!this.pgnData?.variation_tree) return;
+
+      const prune = (node) => {
+        if (!node || !Array.isArray(node.variations)) return;
+        node.variations = node.variations.filter(v => !this.unsavedNodeIds.includes(v.id));
+        node.variations.forEach(prune);
+      };
+
+      prune(this.pgnData.variation_tree);
+
+      if (this.backupTreeNodeId !== null) {
+        this.showTreeNode(this.backupTreeNodeId);
+      }
+
+      this.hasUnsavedChanges = false;
+      this.unsavedNodeIds = [];
+      this.backupTreeNodeId = null;
+      this.refreshQuizPositions();
+      // Deselect current node to close inline editor
+      this.currentTreeNodeId = 0;
     },
 
     formatAnalysisStatus(payload, sourceLabel = "Analysis") {
@@ -424,22 +1066,24 @@ export default {
         return;
       }
 
+      if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+        this.resetAnalysisState("Switching analysis...");
+        this.activeTab = 'Analysis';
+        this.sendAnalysisRequest();
+        return;
+      }
+
       this.resetAnalysisState("Connecting to analysis service...");
       if (this.socket) this.socket.close();
 
       const socketUrl = this.wsUrl("/ws/analyze");
       this.socket = new WebSocket(socketUrl);
 
-      this.socket.onopen = () => {
-        this.analysisStatusText = "Live analysis started";
-        this.socket.send(JSON.stringify({
-          fen: this.fen,
-          depth: LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH,
-          display_target_depth: LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH,
-          worker_target_depth: LIVE_ANALYSIS_WORKER_TARGET_DEPTH,
-          display_lag_depth: LIVE_ANALYSIS_DISPLAY_LAG_DEPTH,
-        }));
-      };
+       this.socket.onopen = () => {
+         this.analysisStatusText = "Live analysis started";
+         this.activeTab = 'Analysis';
+         this.sendAnalysisRequest();
+       };
       this.socket.onmessage = (event) => {
         this.handleAnalysisMessage(event.data);
       };
@@ -457,6 +1101,22 @@ export default {
         }
         this.socket = null;
       };
+    },
+
+    sendAnalysisRequest() {
+      if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+        console.warn("Cannot send analysis request: socket not open");
+        return;
+      }
+
+      this.socket.send(JSON.stringify({
+        fen: this.fen,
+        depth: LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH,
+        display_target_depth: LIVE_ANALYSIS_DISPLAY_TARGET_DEPTH,
+        worker_target_depth: LIVE_ANALYSIS_WORKER_TARGET_DEPTH,
+        display_lag_depth: LIVE_ANALYSIS_DISPLAY_LAG_DEPTH,
+      }));
+      this.updateAnalysisStatus('Live analysis updated', true);
     },
 
     stopLiveAnalysis() {
@@ -506,115 +1166,49 @@ export default {
       }
     },
 
-    async uploadPGN() {
-      const fileInput = document.createElement("input");
-      fileInput.type = "file";
-      fileInput.accept = ".pgn";
-      fileInput.onchange = async () => {
-        const file = fileInput.files[0];
-        if (!file) return;
+    triggerUpload() {
+      this.$refs.fileInput.click();
+    },
 
-        const formData = new FormData();
-        formData.append("file", file);
+    async uploadPGN(event) {
+      const file = event.target.files[0];
+      if (!file) return;
 
-        try {
-          console.log(`Uploading PGN to: ${this.apiUrl("/games")}`);
+      const formData = new FormData();
+      formData.append('file', file);
 
-          const createRes = await fetch(this.apiUrl("/games"), {
-            method: "POST",
-            body: formData
-          });
+      this.isUploading = true;
+      this.uploadStatus = `Uploading and processing ${file.name}...`;
 
-          console.log("POST /games response status:", createRes.status);
+      try {
+        const response = await fetch(buildApiUrl('/games'), {
+          method: 'POST',
+          body: formData,
+        });
+        const data = await response.json();
+        if (data.success) {
+          const totalProcessed = data.total_games_created || 1;
+          this.uploadStatus = `Successfully processed ${totalProcessed} games!`;
+          // Brief pause to show success status before loading
+          await new Promise(r => setTimeout(r, 1000));
 
-          if (!createRes.ok) {
-            const errorMsg = await this.readErrorResponse(createRes, "Failed to upload PGN");
-            console.error("Upload error:", errorMsg);
-            alert(`Error: ${errorMsg}`);
-            return;
-          }
+          // Track session games - all_created_ids from response
+          const createdIds = data.all_created_ids || [data.id];
+          this.sessionGameIds = createdIds;
 
-          const created = await createRes.json();
-          console.log("POST /games payload:", created);
-
-          let pgnData;
-          this.gameId = created.id ?? null;
-
-          if (Array.isArray(created.positions)) {
-            pgnData = {
-              success: true,
-              headers: created.headers,
-              total_moves: created.total_moves,
-              positions: created.positions,
-              movetext: created.movetext || null,
-              variation_tree: created.variation_tree || null,
-              mainline_node_ids: Array.isArray(created.mainline_node_ids) ? created.mainline_node_ids : null,
-            };
-          } else if (this.gameId != null) {
-            const movesRes = await fetch(this.apiUrl(`/games/${this.gameId}/moves`));
-            console.log("GET /games/{id}/moves response status:", movesRes.status);
-
-            if (!movesRes.ok) {
-              const errorMsg = await this.readErrorResponse(movesRes, "Failed to load moves");
-              console.error("Load moves error:", errorMsg);
-              alert(`Error: ${errorMsg}`);
-              return;
-            }
-
-            const movesPayload = await movesRes.json();
-            console.log("Loaded positions:", movesPayload.total_moves);
-
-            pgnData = {
-              success: true,
-              headers: created.headers,
-              total_moves: movesPayload.total_moves,
-              positions: movesPayload.positions,
-              movetext: movesPayload.movetext || created.movetext || null,
-              variation_tree: movesPayload.variation_tree || created.variation_tree || null,
-              mainline_node_ids: Array.isArray(movesPayload.mainline_node_ids)
-                ? movesPayload.mainline_node_ids
-                : (Array.isArray(created.mainline_node_ids) ? created.mainline_node_ids : null),
-            };
-          } else {
-            throw new Error("Upload succeeded but no positions were returned.");
-          }
-
-          this.pgnData = pgnData;
-          this.currentMove = 0;
-          this.currentTreeNodeId = 0;
-          await this.showPosition(0);
-          console.log("PGN upload successful");
-
-          if (this.gameId != null) {
-            console.log("Starting batch analysis of all positions...");
-            try {
-              const analyzeRes = await fetch(this.apiUrl(`/games/${this.gameId}/analyze`), {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  depth: 15,
-                  time_limit: 1.0
-                })
-              });
-
-              if (analyzeRes.ok) {
-                const analyzeResult = await analyzeRes.json();
-                console.log("✓ Batch analysis complete:", analyzeResult);
-              } else {
-                const errorMsg = await this.readErrorResponse(analyzeRes, "Batch analysis skipped");
-                console.warn("Batch analysis skipped:", errorMsg);
-              }
-            } catch (analyzeErr) {
-              console.warn("Batch analysis not available:", this.stringifyError(analyzeErr, "Unknown error"));
-            }
-          }
-        } catch (error) {
-          const errorMsg = this.stringifyError(error, "Failed to upload PGN");
-          console.error("Upload exception:", error);
-          alert(`Error: ${errorMsg}`);
+          // Refresh games list and select the new game
+          await this.fetchGames();
+          this.loadGame(data.id);
         }
-      };
-      fileInput.click();
+      } catch (err) {
+        console.error("Upload failed", err);
+        this.uploadStatus = "Upload failed: " + (err.message || String(err));
+        // Keep status visible for a few seconds if it's an error
+        await new Promise(r => setTimeout(r, 3000));
+      } finally {
+        this.isUploading = false;
+        this.uploadStatus = "";
+      }
     },
 
     async showPosition(moveIndex) {
@@ -625,13 +1219,17 @@ export default {
         return;
       }
 
-      this.stopLiveAnalysis();
+      const wasAnalyzing = !!this.socket;
       this.resetAnalysisState();
 
       this.currentTreeNodeId = this.getMainlineNodeId(moveIndex);
       const position = this.pgnData.positions[moveIndex];
       this.fen = position.fen;
       await this.renderBoard();
+
+      if (wasAnalyzing) {
+        this.sendAnalysisRequest();
+      }
     },
 
     async selectMove(moveIndex) {
@@ -721,6 +1319,12 @@ export default {
       } else if (event.key === 'ArrowRight' && this.canGoNext) {
         event.preventDefault();
         this.nextMove();
+      } else if (event.key === 'ArrowUp' && this.canGoPrev) {
+        event.preventDefault();
+        this.prevMove();
+      } else if (event.key === 'ArrowDown' && this.canGoNext) {
+        event.preventDefault();
+        this.nextMove();
       } else if (event.key === 'Home' && this.currentMove !== 0) {
         event.preventDefault();
         this.firstMove();
@@ -751,37 +1355,64 @@ export default {
       if (payload.type === "error") {
         this.analysisFurtherActive = false;
         this.analysisFurtherText = "";
-        this.analysisStatusText = payload.message || "Analysis failed";
+        this.updateAnalysisStatus(payload.message || "Analysis failed", true);
         console.error("Analysis error:", payload.message || payload);
         return;
       }
 
       if (payload.type === "status") {
         this.syncAnalysisActivity(payload);
-        this.analysisStatusText = this.formatAnalysisStatus(payload, this.statusLabel(payload.status));
+        this.updateAnalysisStatus(this.formatAnalysisStatus(payload, this.statusLabel(payload.status)));
         return;
       }
 
       if (payload.type === "snapshot") {
         this.syncAnalysisActivity(payload);
         const sourceLabel = payload.source === "database" ? "DB" : "Engine";
-        this.analysisStatusText = this.formatAnalysisStatus(payload, sourceLabel);
+        this.updateAnalysisStatus(this.formatAnalysisStatus(payload, sourceLabel));
         this.renderSnapshot(payload);
       }
     },
 
     formatEvaluationValue(scoreCp, scoreMate) {
-      const fenParts = (this.fen || "").trim().split(/\s+/);
-      const sideToMove = fenParts.length >= 2 ? fenParts[1] : 'w';
-      const sign = sideToMove === 'b' ? -1 : 1;
-
       if (scoreMate !== null && scoreMate !== undefined && scoreMate !== "") {
-        return `#${Number(scoreMate) * sign}`;
+        return `#${Number(scoreMate)}`;
       }
       if (scoreCp !== null && scoreCp !== undefined && scoreCp !== "") {
-        return (Number(scoreCp) * sign / 100).toFixed(2);
+        return (Number(scoreCp) / 100).toFixed(2);
       }
       return "--";
+    },
+
+    updateAnalysisStatus(nextStatus, force = false) {
+      if (typeof nextStatus !== 'string' || !nextStatus.trim()) return;
+      const now = Date.now();
+      if (!force) {
+        if (nextStatus === this.lastStatusText && (now - this.lastStatusRenderedAt) < this.analysisStatusMinMs) {
+          return;
+        }
+        if ((now - this.lastStatusRenderedAt) < this.analysisStatusMinMs) {
+          return;
+        }
+      }
+      this.analysisStatusText = nextStatus;
+      this.lastStatusText = nextStatus;
+      this.lastStatusRenderedAt = now;
+    },
+
+    getCachedAlgebraic(uciMoves, fenString) {
+      if (!uciMoves) return "";
+      const key = `${fenString}__${uciMoves}`;
+      if (Object.prototype.hasOwnProperty.call(this.analysisPvCache, key)) {
+        return this.analysisPvCache[key];
+      }
+
+      const value = this.convertToAlgebraic(uciMoves, fenString);
+      if (Object.keys(this.analysisPvCache).length >= 250) {
+        this.analysisPvCache = Object.create(null);
+      }
+      this.analysisPvCache[key] = value;
+      return value;
     },
 
     renderSnapshot(snapshot) {
@@ -791,7 +1422,7 @@ export default {
 
       const depthLines = lines.map((line, idx) => {
         const pvUci = line.pv || "";
-        const pvAlgebraic = pvUci ? this.convertToAlgebraic(pvUci, this.fen) : "";
+        const pvAlgebraic = pvUci ? this.getCachedAlgebraic(pvUci, this.fen) : "";
         const evalValue = this.formatEvaluationValue(line.score_cp, line.score_mate);
         return {
           label: `Line ${line.line_number || idx + 1}:`,
@@ -811,15 +1442,11 @@ export default {
     },
 
     applyAnalysisDisplay(newDisplay, latestDepth) {
-      if (latestDepth === this.currentAnalysisDepth) {
-        this.currentAnalysisLines = newDisplay;
-        this.lastRenderedAt = Date.now();
-        return;
-      }
-
       const now = Date.now();
       const elapsed = now - (this.lastRenderedAt || 0);
-      const remainingHold = Math.max(0, this.analysisHoldMs - elapsed);
+      const sameDepth = latestDepth === this.currentAnalysisDepth;
+      const requiredDelay = sameDepth ? this.analysisRenderMinMs : this.analysisHoldMs;
+      const remainingHold = Math.max(0, requiredDelay - elapsed);
 
       this.pendingAnalysisLines = newDisplay;
       this.pendingDepth = latestDepth;
@@ -867,21 +1494,16 @@ export default {
             linesByDepth[depth] = [];
           }
           if (linesByDepth[depth].length < 3) {  // Keep all 3 lines
-            const fenParts = (this.fen || "").trim().split(/\s+/);
-            const sideToMove = fenParts.length >= 2 ? fenParts[1] : 'w';
-            const sign = sideToMove === 'b' ? -1 : 1;
-
             const rawScore = parseInt(scoreMatch[2], 10);
-            const normalizedScore = rawScore * sign;
 
             const evalValue =
               scoreMatch[1] === "cp"
-                ? (normalizedScore / 100).toFixed(2)
-                : `#${normalizedScore}`;
+                ? (rawScore / 100).toFixed(2)
+                : `#${rawScore}`;
 
             const pvUci = pvMatch ? pvMatch[1] : "";
             const pvAlgebraic = pvUci
-              ? this.convertToAlgebraic(pvUci, this.fen)
+              ? this.getCachedAlgebraic(pvUci, this.fen)
               : "";
 
             linesByDepth[depth].push({ eval: evalValue, pv: pvAlgebraic });
@@ -918,6 +1540,7 @@ export default {
 
 <style scoped>
 .analyzer {
+  position: relative;
   text-align: center;
   max-width: 1320px;
   width: 100%;
@@ -931,27 +1554,32 @@ input, button {
 
 .layout {
   display: grid;
-  grid-template-columns: minmax(460px, 560px) minmax(370px, 485px);
-  grid-template-rows: auto auto;
+  grid-template-columns: 60px minmax(430px, 520px) minmax(460px, 700px);
   gap: 16px;
   align-items: start;
   justify-content: center;
   padding: 0 12px;
 }
 
-.top-left {
+.left-sidebar {
   grid-column: 1;
-  grid-row: 1;
-  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 10px;
+  position: relative;
 }
 
-.mid-left {
-  grid-column: 1;
-  grid-row: 2;
-  min-width: 0;
+.board-settings-anchor {
+  position: absolute;
+  top: 0;
+  left: calc(100% + 12px);
+  z-index: 30;
 }
 
-.board-area {
+.center-stage {
+  grid-column: 2;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -959,24 +1587,84 @@ input, button {
 }
 
 .right-panel {
-  grid-column: 2;
-  grid-row: 1 / span 2;
+  grid-column: 3;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
-@media (max-width: 980px) {
+.tabs-header {
+  display: flex;
+  border-bottom: 2px solid #e0e0e0;
+}
+
+.tabs-header button {
+  background: none;
+  border: none;
+  padding: 8px 16px;
+  margin: 0;
+  cursor: pointer;
+  font-weight: bold;
+  color: #666;
+}
+
+.tabs-header button.active {
+  color: #2196F3;
+  border-bottom: 2px solid #2196F3;
+  margin-bottom: -2px;
+}
+
+.tabs-header button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.tab-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.empty-state {
+  padding: 30px 15px;
+  color: #888;
+  font-style: italic;
+  background: #fafafa;
+  border-radius: 8px;
+  border: 1px dashed #ddd;
+  margin-top: 10px;
+}
+
+.board-controls {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 5px;
+}
+
+@media (max-width: 1080px) {
+  .layout {
+    grid-template-columns: 60px 1fr;
+    grid-template-rows: auto auto;
+  }
+  .left-sidebar { grid-column: 1; grid-row: 1; }
+  .board-settings-anchor {
+    position: static;
+    margin-top: 8px;
+  }
+  .center-stage { grid-column: 2; grid-row: 1; }
+  .right-panel { grid-column: 1 / span 2; grid-row: 2; }
+}
+
+@media (max-width: 600px) {
   .layout {
     grid-template-columns: 1fr;
-    grid-template-rows: auto auto auto;
   }
-  .top-left,
-  .mid-left,
-  .right-panel {
-    grid-column: 1;
-  }
-  .top-left { grid-row: 1; }
-  .mid-left { grid-row: 2; }
-  .right-panel { grid-row: 3; }
+  .left-sidebar { grid-column: 1; flex-direction: row; justify-content: center; }
+  .board-settings-anchor { width: 100%; }
+  .center-stage { grid-column: 1; }
+  .right-panel { grid-column: 1; }
 }
 
 /* Live analysis card styling (kept here because LiveAnalysisPanel only defines inner scroll styles) */
@@ -995,6 +1683,36 @@ input, button {
   max-width: 100%;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
   border-radius: 4px;
+}
+
+.upload-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(255, 255, 255, 0.8);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+  backdrop-filter: blur(2px);
+}
+
+.upload-spinner {
+  border: 4px solid #f3f3f3;
+  border-top: 4px solid #3498db;
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  animation: spin 1s linear infinite;
+  margin-bottom: 1rem;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
 }
 
 .analysis-line {
@@ -1019,14 +1737,75 @@ input, button {
 }
 
 .pv-moves {
-  font-family: 'Courier New', Courier, monospace;
-  color: #555;
-  font-size: 12px;
-  flex: 1;
-  word-wrap: break-word;
-  overflow-wrap: break-word;
-  word-break: break-word;
-  white-space: pre-wrap;
+  max-height: 400px;
+  overflow-y: auto;
 }
+
+.pgn-save-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 15px;
+  justify-content: center;
+}
+
+.pgn-save-actions button {
+  padding: 8px 16px;
+  font-weight: bold;
+}
+
+.btn-save {
+  background-color: #4CAF50;
+  color: white;
+  border: none;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.btn-discard {
+  background-color: #95a5a6;
+  color: white;
+  border: none;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.btn-discard:hover {
+  background-color: #7f8c8d;
+}
+
+.pgn-quiz-action {
+  display: flex;
+  justify-content: center;
+  margin-top: 15px;
+}
+
+.btn-start-quiz {
+  background-color: #e91e63;
+  color: white;
+  border: none;
+  padding: 10px 20px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: bold;
+  font-size: 14px;
+  transition: background-color 0.2s;
+}
+
+.btn-start-quiz:hover:not(:disabled) {
+  background-color: #c2185b;
+}
+
+.btn-start-quiz:active:not(:disabled) {
+  background-color: #ad1457;
+}
+
+.btn-start-quiz:disabled {
+  background-color: #ccc;
+  color: #666;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+
 </style>
 
