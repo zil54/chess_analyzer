@@ -1,10 +1,12 @@
-<template>
+﻿<template>
   <div class="quiz-tab">
-    <div v-if="!isQuizStarted" class="quiz-setup">
+
+    <!-- â”€â”€ Setup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+    <div v-if="!isQuizStarted && !quizResults && !isLoadingResults" class="quiz-setup">
       <h3>Quiz Mode</h3>
       <p v-if="positions.length === 0" class="no-positions">
-        No critical positions found in this game. <br>
-        Add {CPosition} in comments to mark them.
+        No critical positions found.<br>
+        Add <code>{CPosition}</code> to move comments to mark them.
       </p>
       <div v-else>
         <div class="setup-group">
@@ -17,68 +19,255 @@
         </div>
         <div class="setup-group">
           <label>Time per move (sec):</label>
-          <input type="number" v-model.number="timeLimit" min="5" max="300">
+          <input type="number" v-model.number="timeLimit" min="5" max="300" class="time-input">
         </div>
-        <p class="quiz-info">
-          Found {{ filteredPositions.length }} positions for your choice.
-        </p>
-        <button
-          class="btn-start"
-          @click="startQuiz"
-          :disabled="filteredPositions.length === 0"
-        >
+        <p class="quiz-info">{{ filteredPositions.length }} position(s) for your selection.</p>
+        <button class="btn-start" @click="startQuiz" :disabled="filteredPositions.length === 0">
           Start Quiz
         </button>
       </div>
     </div>
 
-    <div v-else class="quiz-active">
+    <!-- â”€â”€ Active quiz â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+    <div v-else-if="isQuizStarted" class="quiz-active">
       <div class="quiz-header">
-        <div class="quiz-progress">
-          Progress: {{ currentIdx + 1 }} / {{ filteredPositions.length }}
+        <div class="quiz-progress">Position {{ currentIdx + 1 }} / {{ _quizPositions.length }}</div>
+        <div class="quiz-timer" :class="{ 'timer-low': timer < 10 }">&#9201; {{ timer }}s</div>
+      </div>
+
+      <!-- Waiting for a move -->
+      <template v-if="!isRevealed">
+        <div class="quiz-instruction">Make your move on the board.</div>
+        <div class="quiz-idle-note">Stockfish analysis runs after you finish &mdash; not during quiz.</div>
+        <div class="quiz-controls">
+          <button class="btn-stop" @click="stopQuiz">Stop Quiz</button>
+          <button class="btn-skip" @click="skipPosition">Skip &rarr;</button>
         </div>
-        <div class="quiz-timer" :class="{ 'timer-low': timer < 10 }">
-          Time: {{ timer }}s
+      </template>
+
+      <!-- After a move was submitted -->
+      <template v-else>
+        <div class="submitted-box">
+          <span class="submitted-label">Submitted:</span>
+          <strong class="submitted-san">
+            {{ formatMoveWithNumber(currentPosition && currentPosition.fen_before, submittedMoveSan) }}
+          </strong>
+        </div>
+        <div class="quiz-controls">
+          <button class="btn-stop" @click="stopQuiz">Stop Quiz</button>
+          <button v-if="currentIdx < _quizPositions.length - 1" class="btn-next" @click="nextPosition">
+            Next Position &rarr;
+          </button>
+          <button v-else class="btn-finish" @click="finishQuiz">Finish &amp; Analyze</button>
+        </div>
+      </template>
+    </div>
+
+    <!-- â”€â”€ Loading â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+    <div v-else-if="isLoadingResults" class="quiz-loading">
+      <div class="loading-spinner"></div>
+      <p class="loading-text">Analyzing with Stockfish (3 lines)&hellip;</p>
+      <p class="loading-sub">Takes a few seconds per position</p>
+    </div>
+
+    <!-- â”€â”€ Results â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+    <div v-else-if="quizResults" class="quiz-results">
+
+      <!-- Score banner -->
+      <div class="score-banner">
+        <div class="score-pct">{{ quizResults.score_percentage }}%</div>
+        <div class="score-detail">
+          <span class="sd-full">&#10003; {{ quizResults.full_answers }} correct</span>
+          <span class="sd-sep">&middot;</span>
+          <span class="sd-partial" v-if="quizResults.partial_answers > 0">&#8856; {{ quizResults.partial_answers }} partial</span>
+          <span class="sd-sep" v-if="quizResults.partial_answers > 0">&middot;</span>
+          <span class="sd-fail">&#10007; {{ quizResults.fail_answers }} incorrect</span>
+          <template v-if="quizResults.skipped_answers > 0">
+            <span class="sd-sep">&middot;</span>
+            <span class="sd-skip">&mdash; {{ quizResults.skipped_answers }} skipped</span>
+          </template>
+        </div>
+        <div class="score-credit" v-if="quizResults.total_credit != null">
+          {{ quizResults.total_credit.toFixed(2) }} / {{ quizResults.total_questions }} pts
         </div>
       </div>
 
-      <div class="quiz-stats">
-        Completed: {{ completedCount }}
+      <p v-if="quizResults.error" class="results-error">&#9888; {{ quizResults.error }}</p>
+
+      <!-- Per-position cards -->
+      <div class="results-list">
+        <div
+          v-for="(entry, idx) in quizResults.entries"
+          :key="idx"
+          class="rcard"
+          :class="{
+            'rcard-pass':    entry.result_type === 'full' || (!entry.analysis && entry.pass),
+            'rcard-partial': entry.result_type === 'partial',
+            'rcard-fail':    entry.attempted && !entry.pass,
+            'rcard-skipped': !entry.attempted
+          }"
+        >
+          <!-- Card header row -->
+          <div class="rcard-head">
+            <span class="rcard-num rcard-num-click"
+              @click="$emit('jump-to-ply', entry.ply)"
+            >
+              Position {{ idx + 1 }}
+            </span>
+            <span class="rcard-badge"
+              :class="{
+                'badge-full':    entry.result_type === 'full' || (!entry.analysis && entry.pass),
+                'badge-partial': entry.result_type === 'partial',
+                'badge-fail':    entry.attempted && !entry.pass,
+                'badge-skipped': !entry.attempted
+              }"
+            >
+              <template v-if="entry.result_type === 'full' || (!entry.analysis && entry.pass)">&#10003; Correct</template>
+              <template v-else-if="entry.result_type === 'partial'">&#8856; Partial ({{ (entry.analysis ? entry.analysis.credit : entry.credit || 0).toFixed(2) }})</template>
+              <template v-else-if="entry.attempted">&#10007; Incorrect</template>
+              <template v-else>&mdash; Skipped</template>
+            </span>
+          </div>
+
+          <!-- Analysis side by side -->
+          <div class="rcard-body">
+            <!-- Move info & SF analysis -->
+            <div class="rcard-analysis">
+
+              <!-- Move comparison -->
+              <div class="move-block">
+                <div class="move-row">
+                  <span class="mlabel">Your move:</span>
+                  <span class="msan" :class="{ 'msan-pass': entry.pass, 'msan-fail': entry.attempted && !entry.pass, 'msan-none': !entry.attempted }">
+                    {{ entry.user_move_san ? formatMoveWithNumber(entry.fen_before, entry.user_move_san) : '(not played)' }}
+                  </span>
+                </div>
+                <div class="move-row">
+                  <span class="mlabel">Game move:</span>
+                  <span class="msan">{{ formatMoveWithNumber(entry.fen_before, entry.expected_move_san || entry.game_move_san) }}</span>
+                </div>
+                <div v-if="entry.analysis && entry.analysis.stockfish.best_move_san" class="move-row">
+                  <span class="mlabel">SF best:</span>
+                  <span class="msan msan-sf"
+                    :class="{ 'msan-sf-same': entry.analysis.stockfish.best_move_san === (entry.expected_move_san || entry.game_move_san) }"
+                  >{{ formatMoveWithNumber(entry.fen_before, entry.analysis.stockfish.best_move_san) }}</span>
+                </div>
+              </div>
+
+              <!-- Feedback line -->
+              <div v-if="entry.analysis" class="feedback-line">{{ entry.analysis.feedback }}</div>
+              <div v-else-if="!entry.attempted" class="feedback-line skipped-note">
+                Skipped &mdash; solution was <strong>{{ entry.expected_move_san }}</strong>
+              </div>
+
+          <!-- 3 SF evaluation lines -->
+              <template v-if="entry.analysis && entry.analysis.stockfish.lines && entry.analysis.stockfish.lines.length">
+                <div class="sf-title">SF Lines (depth {{ entry.analysis.stockfish.depth }})</div>
+                <div class="sf-lines">
+                  <div
+                    v-for="(line, li) in entry.analysis.stockfish.lines"
+                    :key="li"
+                    class="sf-line-row"
+                    :class="{ 'sf-line-best': li === 0 }"
+                  >
+                    <span class="sf-eval-badge">{{ formatEval(line.score_cp, line.score_mate) }}</span>
+                    <span class="sf-nag-badge">{{ line.nag || evalToNag(line.score_cp, line.score_mate) }}</span>
+                    <span class="sf-pv">{{ line.pv_san }}</span>
+                  </div>
+                </div>
+              </template>
+
+            </div>
+          </div>
+        </div>
       </div>
 
-      <div class="quiz-controls">
-        <button class="btn-stop" @click="stopQuiz">Stop Quiz</button>
-        <button class="btn-reveal" @click="revealSolution" :disabled="isRevealed">Show Solution</button>
-      </div>
-
-      <div v-if="feedback" class="quiz-feedback" :class="feedbackClass">
-        {{ feedback }}
-      </div>
-
-      <div v-if="isRevealed" class="solution-box">
-        Solution: <strong>{{ currentPosition.expected_move_san }}</strong>
-        <p v-if="currentPosition.comment" class="solution-comment">{{ currentPosition.comment }}</p>
-        <button v-if="currentIdx < filteredPositions.length - 1" @click="nextPosition" class="btn-next">Next Position</button>
-        <button v-else @click="finishQuiz" class="btn-finish">Finish Quiz</button>
+      <div class="results-actions">
+        <button @click="redoQuiz"  class="btn-redo">&#8635; Redo Quiz</button>
+        <button @click="resetQuiz" class="btn-new">New Setup</button>
       </div>
     </div>
+
   </div>
+
+  <!-- â”€â”€ Fixed board tooltip (escapes overflow:auto clipping) â”€â”€â”€â”€â”€â”€â”€â”€ -->
+  <teleport to="body">
+    <div
+      v-if="hoveredPositionIdx !== null && quizResults && quizResults.entries[hoveredPositionIdx]"
+      class="pos-tooltip-fixed"
+      :style="{ left: tooltipX + 'px', top: tooltipY + 'px' }"
+    >
+      <MiniBoard :fen="quizResults.entries[hoveredPositionIdx].fen_before" :size="180" />
+    </div>
+  </teleport>
+
 </template>
 
 <script>
+import { h } from 'vue';
+import { Chess } from 'chess.js';
+
+// â”€â”€â”€ MiniBoard: render-function component (no runtime compiler needed) â”€â”€â”€â”€â”€â”€â”€â”€
+const PIECE_UNICODE = {
+  wK: '\u2654', wQ: '\u2655', wR: '\u2656', wB: '\u2657', wN: '\u2658', wP: '\u2659',
+  bK: '\u265A', bQ: '\u265B', bR: '\u265C', bB: '\u265D', bN: '\u265E', bP: '\u265F',
+};
+
+const MiniBoard = {
+  name: 'MiniBoard',
+  props: {
+    fen:  { type: String, required: true },
+    size: { type: Number, default: 120 },
+  },
+  render() {
+    const sqSize = Math.floor(this.size / 8);
+    const cells  = [];
+    try {
+      const chess = new Chess(this.fen);
+      const board = chess.board();
+      for (let r = 0; r < 8; r++) {
+        for (let c = 0; c < 8; c++) {
+          const sq     = board[r][c];
+          const light  = (r + c) % 2 === 0;
+          const piece  = sq ? (PIECE_UNICODE[sq.color + sq.type.toUpperCase()] || '') : '';
+          const pColor = sq ? sq.color : null;
+          cells.push(h('div', {
+            key: `${r}${c}`,
+            style: {
+              width: sqSize + 'px', height: sqSize + 'px',
+              fontSize: (sqSize * 0.72) + 'px',
+              background: light ? '#f0f0f0' : '#505050',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              boxSizing: 'border-box', lineHeight: '1',
+            },
+          }, piece ? [h('span', {
+            style: pColor === 'w'
+              ? 'color:#fff;text-shadow:0 0 2px #000,0 0 1px #000;'
+              : 'color:#000;text-shadow:0 0 2px #ccc;',
+          }, piece)] : []));
+        }
+      }
+    } catch { /* invalid FEN â€“ render empty board */ }
+    return h('div', {
+      style: {
+        display: 'flex', flexWrap: 'wrap',
+        border: '2px solid #333', boxSizing: 'border-box',
+        overflow: 'hidden', borderRadius: '2px',
+        width: this.size + 'px', height: this.size + 'px',
+      },
+    }, cells);
+  },
+};
+
 export default {
   name: 'QuizTab',
   props: {
-    positions: {
-      type: Array,
-      required: true
-    },
-    gameId: {
-      type: Number,
-      required: false
-    }
+    positions:   { type: Array,  required: true },
+    gameId:      { type: Number, required: false, default: null },
+    apiBaseUrl:  { type: String, required: false, default: '' },
   },
-  emits: ['start-quiz', 'stop-quiz', 'show-position', 'quiz-finished', 'correct-move'],
+  emits: ['start-quiz', 'stop-quiz', 'show-position', 'quiz-finished', 'correct-move', 'jump-to-ply'],
+
   data() {
     return {
       isQuizStarted: false,
@@ -87,218 +276,417 @@ export default {
       currentIdx: 0,
       timer: 0,
       timerInterval: null,
-      completedCount: 0,
-      isRevealed: false,
-      feedback: "",
+      isRevealed:       false,
+      submittedMoveSan: null,   // move the user played (null = not yet / skipped)
+      // silent tracking
+      positionResults: {},   // keyed by idx
+      // results
+      quizResults: null,
+      isLoadingResults: false,
+      // snapshot of positions for this quiz run
+      _quizPositions: [],
+      // hover state for position tooltip
+      hoveredPositionIdx: null,
+      tooltipX: 0,
+      tooltipY: 0,
     };
   },
+
   computed: {
     filteredPositions() {
       if (this.selectedColor === 'Both') return this.positions;
       return this.positions.filter(p => p.color === this.selectedColor);
     },
     currentPosition() {
-      return this.filteredPositions[this.currentIdx];
+      return this._quizPositions[this.currentIdx] || null;
     },
-    feedbackClass() {
-      if (!this.feedback) return '';
-      if (this.feedback.includes("Correct")) return "feedback-success";
-      if (this.feedback.includes("Not quite") || this.feedback.includes("Time's up")) return "feedback-error";
-      return "feedback-info";
-    }
   },
+
   methods: {
+    // â”€â”€ Lifecycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     startQuiz() {
-      this.isQuizStarted = true;
-      this.currentIdx = 0;
-      this.completedCount = 0;
-      this.isRevealed = false;
-      this.feedback = "";
+      this._quizPositions   = [...this.filteredPositions];
+      this.isQuizStarted    = true;
+      this.currentIdx       = 0;
+      this.isRevealed       = false;
+      this.submittedMoveSan = null;
+      this.positionResults  = {};
+      this.quizResults      = null;
       this.$emit('start-quiz');
       this.setupPosition();
     },
+
     stopQuiz() {
       this.isQuizStarted = false;
       this.clearTimer();
       this.$emit('stop-quiz');
     },
+
     setupPosition() {
-      this.isRevealed = false;
-      this.feedback = "Find the best move!";
+      if (!this.currentPosition) return;
+      this.isRevealed       = false;
+      this.submittedMoveSan = null;
       this.timer = this.timeLimit;
       this.$emit('show-position', this.currentPosition.fen_before);
-
       this.clearTimer();
       this.timerInterval = setInterval(() => {
-        if (this.timer > 0) {
-          this.timer--;
-        } else {
-          this.onTimeout();
-        }
+        this.timer > 0 ? this.timer-- : this.onTimeout();
       }, 1000);
     },
+
     clearTimer() {
-      if (this.timerInterval) {
-        clearInterval(this.timerInterval);
-        this.timerInterval = null;
-      }
+      if (this.timerInterval) { clearInterval(this.timerInterval); this.timerInterval = null; }
     },
+
     onTimeout() {
       this.clearTimer();
-      this.feedback = "Time's up!";
-      this.revealSolution();
+      this.skipPosition();
     },
+
+    // â”€â”€ Move handling (called by Analyzer on user board move) â”€â”€â”€â”€
     handleUserMove(moveSan) {
       if (!this.isQuizStarted || this.isRevealed) return;
+      const pos = this.currentPosition;
+      if (!pos) return;
 
-      if (moveSan === this.currentPosition.expected_move_san) {
-        this.clearTimer();
-        this.feedback = "Correct!";
-        this.completedCount++;
-        this.isRevealed = true;
-        this.$emit('correct-move');
+      const uciMove   = this._sanToUci(pos.fen_before, moveSan);
+      const isCorrect = moveSan === pos.expected_move_san;
+
+      this.positionResults[this.currentIdx] = {
+        positionIndex:     this.currentIdx,
+        fen_before:        pos.fen_before,
+        expected_move_san: pos.expected_move_san,
+        user_move_san:     moveSan,
+        user_move_uci:     uciMove,
+        ply:               pos.ply,
+        attempted:         true,
+        correct:           isCorrect,
+        revealed:          true,
+      };
+
+      this.submittedMoveSan = moveSan;
+      this.clearTimer();
+      this.isRevealed = true;
+      if (isCorrect) this.$emit('correct-move');
+    },
+
+    // Skip current position without answering â†’ go directly to next
+    skipPosition() {
+      if (!this.positionResults[this.currentIdx]) {
+        const pos = this.currentPosition;
+        if (pos) {
+          this.positionResults[this.currentIdx] = {
+            positionIndex:     this.currentIdx,
+            fen_before:        pos.fen_before,
+            expected_move_san: pos.expected_move_san,
+            user_move_san:     null,
+            user_move_uci:     null,
+            ply:               pos.ply,
+            attempted:         false,
+            correct:           false,
+            revealed:          false,
+          };
+        }
+      }
+      this.clearTimer();
+      if (this.currentIdx < this._quizPositions.length - 1) {
+        this.currentIdx++;
+        this.setupPosition();
       } else {
-        this.feedback = `Not quite. Try again!`;
+        this.finishQuiz();
       }
     },
-    revealSolution() {
-      this.isRevealed = true;
-      this.clearTimer();
-    },
+
     nextPosition() {
-      if (this.currentIdx < this.filteredPositions.length - 1) {
+      if (this.currentIdx < this._quizPositions.length - 1) {
         this.currentIdx++;
         this.setupPosition();
       }
     },
+
     finishQuiz() {
       this.isQuizStarted = false;
       this.clearTimer();
-      this.$emit('quiz-finished', {
-        completed: this.completedCount,
-        total: this.filteredPositions.length
+      this.$emit('stop-quiz');
+      this.submitQuizForAnalysis();
+    },
+
+    // â”€â”€ Backend analysis â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    async submitQuizForAnalysis() {
+      const allEntries = this._quizPositions.map((pos, idx) => {
+        return this.positionResults[idx] || {
+          positionIndex: idx,
+          fen_before: pos.fen_before,
+          expected_move_san: pos.expected_move_san,
+          user_move_san: null,
+          user_move_uci: null,
+          ply: pos.ply,
+          attempted: false,
+          correct: false,
+          revealed: false,
+        };
       });
-    }
+
+      const backendPayload = allEntries
+        .filter(e => e.user_move_uci)
+        .map(e => ({
+          ply: e.ply,
+          fen_before: e.fen_before,
+          expected_move: e.expected_move_san,
+          user_move: e.user_move_uci,
+        }));
+
+      this.isLoadingResults = true;
+      let backendResultsMap = {};
+
+      try {
+        if (this.gameId && backendPayload.length > 0) {
+          const url = `${this.apiBaseUrl}/games/${this.gameId}/quiz/results`;
+          const resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ responses: backendPayload, depth: 20, time_limit: 0.6 }),
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            for (const r of (data.results || [])) {
+              backendResultsMap[r.ply] = r;
+            }
+          } else {
+            console.warn('Quiz analysis HTTP error', resp.status);
+          }
+        }
+      } catch (err) {
+        console.error('Quiz analysis fetch failed:', err);
+      } finally {
+        this.isLoadingResults = false;
+      }
+
+      // Merge backend results into entries
+      const mergedEntries = allEntries.map(e => {
+        const backendR = backendResultsMap[e.ply] || null;
+        return {
+          ...e,
+          result_type: backendR ? backendR.result_type : (e.correct ? 'full' : 'fail'),
+          credit:      backendR ? backendR.credit       : (e.correct ? 1.0   : 0.0),
+          pass:        backendR ? backendR['pass']       : e.correct,
+          analysis: backendR
+            ? {
+                feedback:         backendR.feedback,
+                credit:           backendR.credit,
+                result_type:      backendR.result_type,
+                eval_swing_cp:    backendR.eval_swing_cp,
+                expected_move_san: backendR.game_move_san || e.expected_move_san,
+                game_move_san:    backendR.game_move_san,
+                game_differs_from_sf: backendR.game_differs_from_sf,
+                stockfish:        backendR.stockfish,
+              }
+            : null,
+        };
+      });
+
+      const passCount    = mergedEntries.filter(e => e.pass).length;
+      const fullCount    = mergedEntries.filter(e => e.result_type === 'full').length;
+      const partialCount = mergedEntries.filter(e => e.result_type === 'partial').length;
+      const attemptedCnt = mergedEntries.filter(e => e.attempted).length;
+      const failCount    = mergedEntries.filter(e => e.attempted && !e.pass).length;
+      const totalCredit  = mergedEntries.reduce((s, e) => s + (e.credit || 0), 0);
+
+      this.quizResults = {
+        score_percentage: attemptedCnt > 0 ? Math.round((totalCredit / attemptedCnt) * 100) : 0,
+        pass_answers:    passCount,
+        full_answers:    fullCount,
+        partial_answers: partialCount,
+        fail_answers:    failCount,
+        skipped_answers: mergedEntries.length - attemptedCnt,
+        total_questions: mergedEntries.length,
+        total_credit:    Math.round(totalCredit * 100) / 100,
+        entries: mergedEntries,
+        error: (backendPayload.length === 0)
+          ? 'No moves played â€“ engine analysis unavailable.'
+          : (!this.gameId ? 'No game ID â€“ engine analysis unavailable.' : null),
+      };
+
+      this.$emit('quiz-finished', { completed: passCount, total: mergedEntries.length });
+    },
+
+    // â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    onPositionHover(idx, e) {
+      this.hoveredPositionIdx = idx;
+      this.tooltipX = e.clientX + 18;
+      this.tooltipY = Math.max(10, e.clientY - 90);
+    },
+
+    formatMoveWithNumber(fen, san) {
+      if (!san) return '';
+      if (!fen) return san;
+      try {
+        const parts = fen.split(' ');
+        const side = parts[1]; // 'w' or 'b'
+        const moveNum = parseInt(parts[5], 10) || 1;
+        return side === 'w' ? `${moveNum}. ${san}` : `${moveNum}...${san}`;
+      } catch {
+        return san;
+      }
+    },
+
+    _sanToUci(fen, san) {
+      try {
+        const b = new Chess(fen);
+        const m = b.move(san);
+        return m ? m.from + m.to + (m.promotion || '') : null;
+      } catch { return null; }
+    },
+
+    formatEval(scoreCp, scoreMate) {
+      if (scoreMate !== null && scoreMate !== undefined) {
+        return scoreMate > 0 ? `#${scoreMate}` : `#-${Math.abs(scoreMate)}`;
+      }
+      if (scoreCp === null || scoreCp === undefined) return '?';
+      const v = (scoreCp / 100).toFixed(2);
+      return scoreCp >= 0 ? `+${v}` : `${v}`;
+    },
+
+    evalToNag(scoreCp, scoreMate) {
+      if (scoreMate !== null && scoreMate !== undefined) {
+        return scoreMate > 0 ? `#${scoreMate}` : `#-${Math.abs(scoreMate)}`;
+      }
+      if (scoreCp === null || scoreCp === undefined) return '?';
+      const cp = scoreCp;
+      if (Math.abs(cp) < 25)   return '=';
+      if (cp >= 25  && cp < 100)  return 'â©²';
+      if (cp <= -25 && cp > -100) return 'â©±';
+      if (cp >= 100 && cp < 300)  return 'Â±';
+      if (cp <= -100 && cp > -300) return 'âˆ“';
+      if (cp >= 300)  return '+âˆ’';
+      return 'âˆ’+';
+    },
+
+    redoQuiz() {
+      this.positionResults  = {};
+      this.quizResults      = null;
+      this.currentIdx       = 0;
+      this.isRevealed       = false;
+      this.submittedMoveSan = null;
+      this.isQuizStarted    = true;
+      this.$emit('start-quiz');
+      this.setupPosition();
+    },
+
+    resetQuiz() {
+      this.positionResults  = {};
+      this.quizResults      = null;
+      this.currentIdx       = 0;
+      this.isQuizStarted    = false;
+      this.isRevealed       = false;
+      this.submittedMoveSan = null;
+      this._quizPositions   = [];
+    },
+
+    setQuizResponses() {},  // compat stub
   },
-  beforeUnmount() {
-    this.clearTimer();
-  }
+
+  beforeUnmount() { this.clearTimer(); },
 };
 </script>
 
 <style scoped>
-.quiz-tab {
-  padding: 15px;
-  display: flex;
-  flex-direction: column;
-  gap: 15px;
-  text-align: left;
+/* ── Global ─────────────────────────────────────────────── */
+.quiz-tab { padding: 14px; display: flex; flex-direction: column; gap: 14px; text-align: left; font-size: 0.91em; }
+/* ── Setup ──────────────────────────────────────────────── */
+.setup-group  { display: flex; flex-direction: column; gap: 5px; margin-bottom: 14px; }
+.radio-group  { display: flex; gap: 14px; }
+.time-input   { width: 72px; }
+.quiz-info    { color: #555; font-size: 0.88em; margin: 0; }
+.no-positions { color: #888; font-style: italic; }
+.btn-start { background: #1976d2; color: #fff; border: none; border-radius: 5px; padding: 10px 18px; font-weight: bold; cursor: pointer; width: 100%; }
+.btn-start:disabled { background: #bdbdbd; cursor: not-allowed; }
+/* ── Active quiz ────────────────────────────────────────── */
+.quiz-header    { display: flex; justify-content: space-between; align-items: center; font-weight: bold; }
+.timer-low      { color: #e53935; }
+.quiz-instruction { color: #444; margin: 6px 0 2px; font-size: 1em; }
+.quiz-idle-note { font-size: 0.78em; color: #888; font-style: italic; margin: 0; }
+.quiz-controls  { display: flex; gap: 8px; margin-top: 10px; }
+.btn-stop   { background: #9e9e9e; color: #fff; border: none; border-radius: 4px; padding: 7px 14px; cursor: pointer; }
+.btn-skip   { background: #f57c00; color: #fff; border: none; border-radius: 4px; padding: 7px 14px; cursor: pointer; flex: 1; font-weight: bold; }
+.btn-next   { background: #43a047; color: #fff; border: none; border-radius: 4px; padding: 7px 14px; cursor: pointer; flex: 1; font-weight: bold; }
+.btn-finish { background: #1976d2; color: #fff; border: none; border-radius: 4px; padding: 7px 14px; cursor: pointer; flex: 1; font-weight: bold; }
+.submitted-box {
+  margin-top: 12px; padding: 11px 14px;
+  background: #e8f5e9; border-left: 5px solid #43a047; border-radius: 6px;
+  display: flex; align-items: baseline; gap: 8px;
 }
-
-.setup-group {
-  margin-bottom: 15px;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
+.submitted-label { font-size: 0.85em; color: #555; font-weight: 600; flex-shrink: 0; }
+.submitted-san   { font-family: 'Courier New', monospace; font-size: 1.1em; color: #1b5e20; }
+/* ── Loading ────────────────────────────────────────────── */
+.quiz-loading { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 40px 20px; }
+.loading-spinner { width: 36px; height: 36px; border: 4px solid #e0e0e0; border-top-color: #1976d2; border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-text { font-weight: bold; color: #333; margin: 0; }
+.loading-sub  { color: #888; font-size: 0.85em; margin: 0; }
+/* ── Results ────────────────────────────────────────────── */
+.quiz-results { display: flex; flex-direction: column; gap: 14px; }
+.score-banner {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 16px 24px; background: linear-gradient(135deg,#1565c0,#42a5f5);
+  color: #fff; border-radius: 10px;
 }
-
-.radio-group {
-  display: flex;
-  gap: 15px;
-}
-
-.btn-start {
-  background-color: #2196F3;
-  color: white;
-  border: none;
-  padding: 10px 20px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-weight: bold;
-  width: 100%;
-}
-
-.btn-start:disabled {
-  background-color: #ccc;
-  cursor: not-allowed;
-}
-
-.quiz-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 15px;
-  font-weight: bold;
-}
-
-.timer-low {
-  color: #f44336;
-}
-
-.quiz-controls {
-  display: flex;
-  gap: 10px;
-  margin-top: 15px;
-}
-
-.btn-stop {
-  background-color: #9e9e9e;
-  color: white;
-  border: none;
-  padding: 8px 16px;
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-.btn-reveal {
-  background-color: #ff9800;
-  color: white;
-  border: none;
-  padding: 8px 16px;
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-.quiz-feedback {
-  padding: 10px;
-  border-radius: 4px;
-  margin-top: 15px;
-  text-align: center;
-  font-weight: bold;
-}
-
-.feedback-info { background-color: #e3f2fd; color: #1976d2; }
-.feedback-success { background-color: #e8f5e9; color: #2e7d32; }
-.feedback-error { background-color: #ffebee; color: #c62828; }
-
-.solution-box {
-  margin-top: 20px;
-  padding: 15px;
-  background-color: #f5f5f5;
-  border-radius: 4px;
-  border-left: 4px solid #4caf50;
-}
-
-.solution-comment {
-  margin-top: 10px;
-  font-style: italic;
-  font-size: 0.9em;
-  color: #666;
-}
-
-.btn-next, .btn-finish {
-  margin-top: 15px;
-  background-color: #4caf50;
-  color: white;
-  border: none;
-  padding: 8px 16px;
-  border-radius: 4px;
-  cursor: pointer;
-  width: 100%;
-}
-
-.no-positions {
-  color: #888;
-  font-style: italic;
+.score-pct    { font-size: 2.8em; font-weight: bold; line-height: 1; }
+.score-detail { display: flex; gap: 7px; flex-wrap: wrap; justify-content: center; font-size: 0.88em; opacity: .9; }
+.score-credit { font-size: 0.85em; opacity: .8; margin-top: 2px; }
+.sd-sep     { opacity: .5; }
+.sd-full    { color: #a5d6a7; }
+.sd-partial { color: #ffe082; }
+.sd-fail    { color: #ef9a9a; }
+.sd-skip    { color: #b0bec5; }
+.results-error { padding: 8px 12px; background: #fff3e0; color: #e65100; border-radius: 4px; font-size: 0.88em; }
+.results-list  { display: flex; flex-direction: column; gap: 10px; max-height: 65vh; overflow-y: auto; }
+.rcard         { border: 1px solid #ddd; border-radius: 8px; padding: 10px 12px; background: #fafafa; }
+.rcard-pass    { border-left: 5px solid #43a047; background: #f1f8f5; }
+.rcard-partial { border-left: 5px solid #fbc02d; background: #fffde7; }
+.rcard-fail    { border-left: 5px solid #e53935; background: #fdf4f4; }
+.rcard-skipped { border-left: 5px solid #bdbdbd; background: #f5f5f5; }
+.rcard-head  { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.rcard-num   { font-weight: bold; color: #1565c0; cursor: default; text-decoration: underline dotted #90caf9; user-select: none; }
+.rcard-badge { font-size: 0.8em; font-weight: bold; padding: 3px 8px; border-radius: 12px; }
+.badge-full    { background: #c8e6c9; color: #1b5e20; }
+.badge-partial { background: #fff9c4; color: #f57f17; }
+.badge-fail    { background: #ffcdd2; color: #b71c1c; }
+.badge-skipped { background: #e0e0e0; color: #616161; }
+.rcard-body      { display: flex; gap: 10px; align-items: flex-start; }
+.rcard-analysis  { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+.move-block { display: flex; flex-direction: column; gap: 3px; }
+.move-row   { display: flex; align-items: center; gap: 6px; }
+.mlabel     { min-width: 76px; font-weight: 600; color: #666; font-size: 0.85em; flex-shrink: 0; }
+.msan       { font-family: 'Courier New', monospace; font-weight: bold; font-size: 1em; }
+.msan-pass  { color: #2e7d32; }
+.msan-fail  { color: #c62828; }
+.msan-sf    { color: #1565c0; }
+.msan-sf-same { color: #2e7d32; }
+.msan-none  { color: #999; font-style: italic; font-weight: normal; font-family: inherit; }
+.feedback-line { font-size: 0.85em; color: #333; line-height: 1.4; }
+.skipped-note  { color: #777; font-style: italic; }
+.sf-title { font-size: 0.8em; font-weight: bold; color: #1565c0; margin-top: 2px; }
+.sf-lines { display: flex; flex-direction: column; gap: 3px; margin-top: 4px; }
+.sf-line-row { display: flex; gap: 6px; align-items: baseline; font-size: 0.8em; background: #f5f5f5; border-radius: 4px; padding: 3px 6px; }
+.sf-line-best  { background: #e8eaf6; }
+.sf-eval-badge { flex-shrink: 0; font-weight: bold; min-width: 46px; font-size: 0.95em; color: #1565c0; }
+.sf-nag-badge  { flex-shrink: 0; font-weight: bold; min-width: 22px; font-size: 1em; color: #555; }
+.sf-pv         { color: #444; font-family: 'Courier New', monospace; font-size: 0.93em; word-break: break-word; }
+.results-actions { display: flex; gap: 10px; padding-top: 12px; border-top: 1px solid #e0e0e0; }
+.btn-redo, .btn-new { flex: 1; padding: 10px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+.btn-redo       { background: #1976d2; color: #fff; }
+.btn-redo:hover { background: #1565c0; }
+.btn-new        { background: #757575; color: #fff; }
+.btn-new:hover  { background: #616161; }
+</style>
+<!-- Global style for teleported tooltip (must NOT be scoped) -->
+<style>
+.pos-tooltip-fixed {
+  position: fixed; z-index: 9999;
+  background: #fff; border: 2px solid #424242;
+  border-radius: 6px; padding: 4px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.4);
+  pointer-events: none;
 }
 </style>

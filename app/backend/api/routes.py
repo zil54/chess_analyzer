@@ -1022,3 +1022,85 @@ async def get_quiz_data(game_id: int):
         "game_id": game_id,
         "quiz_positions": quiz_positions
     }
+
+@router.post("/games/{game_id}/quiz/results")
+async def submit_quiz_results(game_id: int, request: Request):
+    """
+    Evaluate quiz responses using Stockfish analysis.
+    
+    Request body (JSON):
+    {
+        "responses": [
+            {
+                "ply": 4,
+                "fen_before": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+                "expected_move": "Nc6",
+                "user_move": "b8c6"  # UCI format
+            },
+            ...
+        ],
+        "depth": 20,        // optional, default 20
+        "time_limit": 0.5   // optional, default 0.5 seconds
+    }
+    
+    Response:
+    {
+        "success": true,
+        "game_id": 1,
+        "total_questions": 5,
+        "correct_answers": 3,
+        "incorrect_answers": 2,
+        "score_percentage": 60,
+        "results": [
+            {
+                "ply": 4,
+                "expected_move": "Nc6",
+                "user_move": "Nc6",
+                "correct": true,
+                "feedback": "✓ Correct! This is Stockfish's best move.",
+                "stockfish": {
+                    "best_move": "Nc6",
+                    "score_cp": 35,
+                    "top_moves": ["Nc6", "d6", "c5"],
+                    "depth": 20
+                }
+            },
+            ...
+        ]
+    }
+    """
+    if not DB_ENABLED:
+        raise HTTPException(status_code=503, detail="Database not configured.")
+    
+    try:
+        from app.backend.services.quiz_results_service import evaluate_quiz_response
+        
+        # Parse request
+        data = await request.json()
+        responses = data.get("responses", [])
+        depth = int(data.get("depth", 20))
+        time_limit = float(data.get("time_limit", 0.5))
+        
+        if not responses:
+            raise HTTPException(status_code=400, detail="responses list is required")
+        
+        logger.info(f"Evaluating quiz for game {game_id} with {len(responses)} responses")
+        
+        # Evaluate quiz responses
+        result = await evaluate_quiz_response(
+            game_id=game_id,
+            responses=responses,
+            depth=depth,
+            time_limit=time_limit
+        )
+        
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error", "Quiz evaluation failed"))
+        
+        return result
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in quiz results endpoint: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Quiz evaluation failed: {str(e)}")

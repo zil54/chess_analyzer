@@ -135,10 +135,12 @@
             ref="quizTab"
             :positions="quizPositions"
             :gameId="gameId"
+            :apiBaseUrl="getApiBaseUrl()"
             @start-quiz="handleStartQuiz"
             @stop-quiz="handleStopQuiz"
             @show-position="handleQuizShowPosition"
             @quiz-finished="handleQuizFinished"
+            @jump-to-ply="jumpToQuizPly"
           />
         </div>
       </aside>
@@ -255,8 +257,8 @@ export default {
       unsavedNodeIds: [],
       backupTreeNodeId: null,
 
-      quizPositions: [],
-      isQuizActive: false,
+       quizPositions: [],
+       isQuizActive: false,
     };
   },
 
@@ -362,6 +364,11 @@ export default {
   },
 
     methods: {
+    // Expose the API base URL so child components (QuizTab) can make direct backend calls
+    getApiBaseUrl() {
+      return getApiBaseUrl();
+    },
+
     toggleBoardSettings() {
       this.isBoardSettingsOpen = !this.isBoardSettingsOpen;
     },
@@ -576,9 +583,38 @@ export default {
     },
 
     handleQuizFinished(stats) {
-      this.handleStopQuiz();
-      alert(`Quiz Finished! Score: ${stats.completed}/${stats.total}`);
+      // Quiz analysis is now handled entirely inside QuizTab.
+      // Just mark quiz as no longer blocking the rest of the UI.
+      this.isQuizActive = false;
+    },
+
+    async jumpToQuizPly(plyTarget) {
+      if (!this.pgnData) return;
+      // Switch to PGN tab first and wait for render
       this.activeTab = 'PGN';
+      await this.$nextTick();
+
+      let targetNodeId = null;
+
+      // Primary path: ply stored in quiz positions is an index into mainline_node_ids
+      const nodeIds = this.pgnData.mainline_node_ids;
+      if (Array.isArray(nodeIds) && plyTarget >= 0 && plyTarget < nodeIds.length) {
+        targetNodeId = nodeIds[plyTarget];
+      }
+
+      // Fallback: search every tree node for a matching .ply property
+      if (targetNodeId == null) {
+        for (const node of Object.values(this.treeNodeMap)) {
+          if (node && node.ply === plyTarget) {
+            targetNodeId = node.id;
+            break;
+          }
+        }
+      }
+
+      if (targetNodeId != null) {
+        await this.selectTreeNode(targetNodeId);
+      }
     },
 
     getContinuationChild(node) {
@@ -740,24 +776,23 @@ export default {
 
     async onUserMove(moveInfo) {
       if (this.isQuizActive) {
-        // Find SAN of the move
-        let san = "";
+        const quizTab = this.$refs.quizTab;
+        const fenBefore = this.fen;
         try {
-          const chess = new Chess(this.fen);
+          const chess = new Chess(fenBefore);
           const moveResult = chess.move({
             from: moveInfo.from,
             to: moveInfo.to,
             promotion: moveInfo.promotion || 'q'
           });
           if (moveResult) {
-            san = moveResult.san;
-            this.fen = moveResult.fen; // Show the move on board
-            if (this.$refs.quizTab) {
-              this.$refs.quizTab.handleUserMove(san);
+            this.fen = moveResult.fen;  // Show the move on board — stays there, quiz gives feedback
+            if (quizTab) {
+              quizTab.handleUserMove(moveResult.san);
             }
           }
         } catch (err) {
-          console.warn("Invalid quiz move", err);
+          console.warn('Invalid quiz move', err);
         }
         return;
       }
