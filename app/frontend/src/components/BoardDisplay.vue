@@ -1,5 +1,5 @@
 <template>
-  <div class="board-display">
+  <div class="board-display" :style="appearanceVars">
     <TheChessboard
       :board-config="boardConfig"
       :reactive-config="true"
@@ -21,7 +21,8 @@ export default {
   },
   props: {
     fen: { type: String, required: true },
-    flipped: { type: Boolean, default: false }
+    flipped: { type: Boolean, default: false },
+    boardTheme: { type: Object, required: true },
   },
   data() {
     return {
@@ -43,14 +44,27 @@ export default {
   },
   watch: {
     fen(newFen) {
-      // Update FEN in board config carefully to avoid resetting board
+      // Keep both the reactive config and the underlying board game state in sync.
       this.boardConfig.fen = newFen;
+      if (this.boardApi && typeof this.boardApi.setPosition === 'function' && newFen) {
+        this.boardApi.setPosition(newFen);
+      }
     },
     flipped(newVal) {
       this.boardConfig.orientation = newVal ? 'black' : 'white';
       if (this.boardApi && typeof this.boardApi.toggleOrientation === 'function') {
         this.boardApi.toggleOrientation();
       }
+    }
+  },
+  computed: {
+    appearanceVars() {
+      return {
+        '--board-light': this.boardTheme?.light || '#f0d9b5',
+        '--board-dark': this.boardTheme?.dark || '#b58863',
+        '--coord-light': this.boardTheme?.coordLight || '#f0d9b5',
+        '--coord-dark': this.boardTheme?.coordDark || '#946f51',
+      };
     }
   },
   methods: {
@@ -81,6 +95,36 @@ export default {
   width: 100%;
   display: flex;
   justify-content: center;
+}
+
+.board-display :deep(cg-board) {
+  background: conic-gradient(
+    var(--board-dark) 25%,
+    var(--board-light) 0 50%,
+    var(--board-dark) 0 75%,
+    var(--board-light) 0
+  ) 0 0 / 25% 25% !important;
+}
+
+.board-display :deep(.orientation-white .files coord:nth-child(odd)),
+.board-display :deep(.orientation-white .ranks coord:nth-child(2n)),
+.board-display :deep(.orientation-black .files coord:nth-child(2n)),
+.board-display :deep(.orientation-black .ranks coord:nth-child(odd)) {
+  color: var(--coord-light) !important;
+}
+
+.board-display :deep(.orientation-white .files coord:nth-child(2n)),
+.board-display :deep(.orientation-white .ranks coord:nth-child(odd)),
+.board-display :deep(.orientation-black .files coord:nth-child(odd)),
+.board-display :deep(.orientation-black .ranks coord:nth-child(2n)) {
+  color: var(--coord-dark) !important;
+}
+
+
+
+.board-display :deep(.promotion-dialog) {
+  background-color: var(--board-light);
+  border-color: var(--board-dark);
 }
 
 :deep(.cg-wrap) {

@@ -4,11 +4,11 @@
       { {{ node.starting_comment }} }
     </span>
 
-    <span v-if="renderSelf && node.san" class="move-item">
+    <span v-if="renderSelf && node.san" class="move-item" :class="{ 'variation-context': inVariation }">
       <button
         type="button"
         class="move-token"
-        :class="{ active: currentNodeId === node.id, mainline: node.is_mainline }"
+        :class="{ active: currentNodeId === node.id, mainline: node.is_mainline, 'variation-move': inVariation }"
         @click="selectMove"
       >
         {{ formattedLabel }}
@@ -17,7 +17,7 @@
     </span>
 
 
-    <span v-if="renderSelf && node.comment" class="move-comment">
+    <span v-if="renderSelf && node.comment" class="move-comment" :class="{ 'variation-comment': inVariation }">
       { {{ node.comment }} }
     </span>
 
@@ -29,9 +29,8 @@
           :isBranchStart="false"
           :renderSelf="true"
           :renderContinuation="false"
+          :inVariation="inVariation"
           @select-node="$emit('select-node', $event)"
-          @update-node-nags="$emit('update-node-nags', $event)"
-          @update-node-comment="$emit('update-node-comment', $event)"
         />
       </span>
 
@@ -42,9 +41,8 @@
             :node="variation"
             :currentNodeId="currentNodeId"
             :isBranchStart="true"
+            :inVariation="true"
             @select-node="$emit('select-node', $event)"
-            @update-node-nags="$emit('update-node-nags', $event)"
-            @update-node-comment="$emit('update-node-comment', $event)"
           />
           <span class="variation-paren">)</span>
         </span>
@@ -57,9 +55,8 @@
           :isBranchStart="false"
           :renderSelf="false"
           :renderContinuation="true"
+          :inVariation="inVariation"
           @select-node="$emit('select-node', $event)"
-          @update-node-nags="$emit('update-node-nags', $event)"
-          @update-node-comment="$emit('update-node-comment', $event)"
         />
       </span>
     </template>
@@ -73,48 +70,11 @@ export default {
     node: { type: Object, required: true },
     currentNodeId: { type: Number, default: 0 },
     isBranchStart: { type: Boolean, default: false },
+    inVariation: { type: Boolean, default: false },
     renderSelf: { type: Boolean, default: true },
     renderContinuation: { type: Boolean, default: true },
   },
   emits: ['select-node'],
-  data() {
-    return {
-      allNags: [
-        [1, '!', 'Good move'],
-        [2, '?', 'Bad move'],
-        [3, '!!', 'Excellent move'],
-        [4, '??', 'Blunder'],
-        [5, '!?', 'Interesting'],
-        [6, '?!', 'Dubious'],
-        [10, '=', 'Equal'],
-        [14, '+=', 'Slightly better for White'],
-        [15, '=+', 'Slightly better for Black'],
-        [16, '+/-', 'Better for White'],
-        [17, '-/+', 'Better for Black'],
-        [18, '+-', 'Winning for White'],
-        [19, '-+', 'Winning for Black'],
-        [12, '∞', 'Unclear'],
-        [130, 'Z', 'Zugzwang'],
-        [138, '⇄', 'Counterplay'],
-        [32, '⟳', 'Repetition'],
-        [36, '↑', 'Initiative'],
-        [40, '→', 'Attack'],
-        [22, '+/−', 'Advantage/Disadvantage'],
-        [23, '−/+', 'Disadvantage/Advantage'],
-        [131, '+/=', 'Compensation(W)'],
-        [133, '=/+', 'Compensation(B)']
-      ]
-    };
-  },
-  watch: {
-    node: {
-      handler(newNode) {
-        // Watchers kept minimal for simple selection
-      },
-      immediate: true,
-      deep: true
-    }
-  },
   computed: {
     formattedLabel() {
       if (!this.node?.san) {
@@ -178,9 +138,13 @@ export default {
   background: transparent;
   color: #1f2328;
   cursor: pointer;
-  font-size: 15px;
+  font-size: 14px;
   line-height: 1.3;
   font-weight: 400;
+}
+
+.move-token.variation-move {
+  font-size: 12px;
 }
 
 .move-token:hover {
@@ -211,8 +175,12 @@ export default {
 
 .move-comment {
   color: #57606a;
-  font-size: 13px;
+  font-size: 12px;
   margin-left: 2px;
+}
+
+.move-comment.variation-comment {
+  font-size: 10.5px;
 }
 
 .move-comment-start {
@@ -227,6 +195,7 @@ export default {
   color: #6e7781;
   font-weight: 600;
   margin: 0 1px;
+  font-size: 12px;
 }
 
 .continuation {

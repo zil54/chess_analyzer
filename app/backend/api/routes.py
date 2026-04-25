@@ -12,10 +12,19 @@ try:
         get_moves,
         get_game_raw_pgn,
         get_eval,
+        update_move_annotations,
         DB_ENABLED,
     )
 except Exception:
     DB_ENABLED = False
+
+    async def update_move_annotations(game_id: int, annotations: list[dict]):
+        return 0
+
+try:
+    from app.backend.db.db import fetch_quiz_positions
+except ImportError:
+    async def fetch_quiz_positions(game_id: int): return []
 
 # Logger (fallback to stdlib if app logger isn't available)
 try:
@@ -81,15 +90,15 @@ COMMENT_ASSESSMENT_ALIAS_MAP = {
 }
 
 PURE_EVAL_COMMENT_REGEX = re.compile(
-    r"^\s*\[%eval\s(?:(?P<mate>#[+-]?\d+)|(?P<cp>[+-]?(?:\d+(?:\.\d+)?|\.\d+)))(?:,(?P<depth>\d+))?\]\s*$"
+    r"^\s*\[%eval\s(?:(?P<mate>#[+-]?\d+)|(?P<cp>[+-]?(?:\d+(?:\.\d+)?|\.\d+)))(?:,(?P<depth>\d+))?]\s*$"
 )
 
 MOVETEXT_PURE_EVAL_COMMENT_REGEX = re.compile(
-    r"\{\s*\[%eval\s(?:(?P<mate>#[+-]?\d+)|(?P<cp>[+-]?(?:\d+(?:\.\d+)?|\.\d+)))(?:,(?P<depth>\d+))?\]\s*\}"
+    r"\{\s*\[%eval\s(?:(?P<mate>#[+-]?\d+)|(?P<cp>[+-]?(?:\d+(?:\.\d+)?|\.\d+)))(?:,(?P<depth>\d+))?]\s*}"
 )
 
 MOVETEXT_COMMENT_ALIAS_REGEX = re.compile(
-    r"\{\s*(?P<alias>1/2-1/2|½-½|=|∞|\+=|=\+|\+/-|-/\+|\+-|-\+)\s*\}"
+    r"\{\s*(?P<alias>1/2-1/2|½-½|=|∞|\+=|=\+|\+/-|-/\+|\+-|-\+)\s*}"
 )
 
 
@@ -223,17 +232,21 @@ def _annotate_position_from_node(position: dict, node: chess.pgn.GameNode | dict
     if not position:
         return position
 
+    is_cp = False
     if isinstance(node, dict):
         nags = list(node.get("nags") or [])
         nag_symbols = list(node.get("nag_symbols") or [])
         nag_display = node.get("nag_display")
         comment = node.get("comment")
+        is_cp = bool(node.get("cp_tag"))
     else:
         raw_nags = getattr(node, "nags", set()) or set()
         nags = sorted(int(nag) for nag in raw_nags)
         nag_symbols = _nag_symbols(raw_nags)
         nag_display = _nag_display(raw_nags)
         comment = (getattr(node, "comment", None) or None)
+        if comment and ("CPosition" in comment):
+            is_cp = True
 
     derived_display, normalized_comment = _assessment_from_comment(comment)
     if nag_display is None:
@@ -244,9 +257,74 @@ def _annotate_position_from_node(position: dict, node: chess.pgn.GameNode | dict
     position["nags"] = nags
     position["nag_symbols"] = nag_symbols
     position["nag_display"] = nag_display
+    position["cp_tag"] = is_cp
     if comment is not None or normalized_comment is None:
         position["comment"] = normalized_comment
     return position
+
+
+def _comment_has_critical_position(comment: str | None) -> bool:
+    return isinstance(comment, str) and "cposition" in comment.lower()
+
+
+def _comment_marks_current_move_as_critical(comment: str | None) -> bool:
+    if not isinstance(comment, str):
+        return False
+    normalized = comment.lower()
+    return (
+        "already critical move" in normalized
+        or "was already critical" in normalized
+        or "this was already critical" in normalized
+    )
+
+
+def _build_quiz_positions_from_rows(rows: list[dict]) -> list[dict]:
+    quiz_positions: list[dict] = []
+    if not rows:
+        return quiz_positions
+
+    for i in range(1, len(rows)):
+        row = rows[i]
+        comment = row.get("comment")
+        is_critical_position = bool(row.get("cp_tag")) or _comment_has_critical_position(comment)
+        if not is_critical_position:
+            continue
+
+        uses_current_move = _comment_marks_current_move_as_critical(comment)
+        target_index = i if uses_current_move else i + 1
+        if target_index >= len(rows):
+            continue
+
+        target_row = rows[target_index]
+        fen_before = rows[i - 1].get("fen") if uses_current_move else row.get("fen")
+        if not fen_before:
+            continue
+
+        quiz_positions.append({
+            "ply": target_row["ply"],
+            "fen_before": fen_before,
+            "expected_move_san": target_row["san"],
+            "color": target_row["color"],
+            "comment": comment,
+        })
+
+    return quiz_positions
+
+
+def _apply_db_annotations_to_mainline_tree(variation_tree: dict | None, rows: list[dict]) -> dict[int, dict]:
+    mainline_lookup = _build_mainline_node_lookup(variation_tree)
+    for row in rows:
+        node = mainline_lookup.get(int(row.get("ply", 0)))
+        if not node:
+            continue
+
+        comment = row.get("comment")
+        cp_tag = bool(row.get("cp_tag")) or _comment_has_critical_position(comment)
+
+        if comment is not None:
+            node["comment"] = comment
+        node["cp_tag"] = cp_tag
+    return mainline_lookup
 
 
 def _build_mainline_node_lookup(variation_tree: dict | None) -> dict[int, dict]:
@@ -422,9 +500,11 @@ def _parse_pgn_payload(pgn_str: str) -> tuple[dict, list[dict], list[dict], int,
             try:
                 node = node.variation(move)
                 comment = (node.comment or None) if node else None
+                is_cp = (comment and "CPosition" in comment) if comment else False
             except Exception:
                 node = None
                 comment = None
+                is_cp = False
 
             positions.append({
                 "move_number": board.fullmove_number,
@@ -438,7 +518,7 @@ def _parse_pgn_payload(pgn_str: str) -> tuple[dict, list[dict], list[dict], int,
                 "san": san,
                 "fen": board.fen(),
                 "comment": comment,
-                "cp_tag": False,
+                "cp_tag": is_cp,
             })
             _annotate_position_from_node(move_rows[-1], node)
 
@@ -650,9 +730,18 @@ async def fetch_game_moves(game_id: int):
             # Extract headers from raw PGN
             headers, _, _, _, movetext_extracted, variation_tree, mainline_node_ids = _parse_pgn_payload(raw_pgn)
             movetext = movetext_extracted
-            mainline_lookup = _build_mainline_node_lookup(variation_tree)
+            mainline_lookup = _apply_db_annotations_to_mainline_tree(variation_tree, rows)
             for position in positions:
-                _annotate_position_from_node(position, mainline_lookup.get(int(position.get("ply", 0))))
+                annotated = _annotate_position_from_node({"ply": position.get("ply")}, mainline_lookup.get(int(position.get("ply", 0))))
+                if "nags" in annotated:
+                    position["nags"] = annotated["nags"]
+                if "nag_symbols" in annotated:
+                    position["nag_symbols"] = annotated["nag_symbols"]
+                if "nag_display" in annotated:
+                    position["nag_display"] = annotated["nag_display"]
+                if position.get("comment") is None and "comment" in annotated:
+                    position["comment"] = annotated["comment"]
+                position["cp_tag"] = bool(position.get("cp_tag")) or bool(annotated.get("cp_tag"))
         except ValueError as e:
             logger.warning("Unable to export PGN movetext for game_id=%s: %s", game_id, e)
             # Fallback: try to extract just movetext if full parse fails
@@ -671,6 +760,47 @@ async def fetch_game_moves(game_id: int):
         "movetext": movetext,
         "variation_tree": variation_tree,
         "mainline_node_ids": mainline_node_ids,
+    }
+
+
+@router.post("/games/{game_id}/annotations")
+async def save_game_annotations(game_id: int, request: Request):
+    """Persist edited mainline move comments / critical-position tags for a game."""
+    if not DB_ENABLED:
+        raise HTTPException(status_code=503, detail="Database not configured. Set DATABASE_URL in .env file.")
+
+    rows = await get_moves(game_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Game not found or has no moves")
+
+    payload = await request.json()
+    annotations = payload.get("annotations") if isinstance(payload, dict) else None
+    if not isinstance(annotations, list):
+        raise HTTPException(status_code=400, detail="annotations must be a list")
+
+    valid_plies = {int(row["ply"]) for row in rows if int(row.get("ply", 0)) > 0}
+    normalized_annotations = []
+    for item in annotations:
+        if not isinstance(item, dict):
+            continue
+        ply = item.get("ply")
+        if not isinstance(ply, int) or ply not in valid_plies:
+            continue
+        comment = item.get("comment")
+        if comment is not None:
+            comment = str(comment).strip() or None
+        cp_tag = bool(item.get("cp_tag")) or _comment_has_critical_position(comment)
+        normalized_annotations.append({
+            "ply": ply,
+            "comment": comment,
+            "cp_tag": cp_tag,
+        })
+
+    updated = await update_move_annotations(game_id, normalized_annotations)
+    return {
+        "success": True,
+        "game_id": game_id,
+        "updated": updated,
     }
 
 
@@ -871,3 +1001,106 @@ async def batch_analyze_game(game_id: int, request: Request):
     except Exception as e:
         logger.error(f"Error in batch analysis: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Batch analysis failed: {str(e)}")
+
+@router.get("/games/{game_id}/quiz")
+async def get_quiz_data(game_id: int):
+    """
+    Get all critical positions for a game.
+    """
+    if not DB_ENABLED:
+        raise HTTPException(status_code=503, detail="Database not configured.")
+
+    quiz_positions = await fetch_quiz_positions(game_id)
+    if not quiz_positions:
+        rows = await get_moves(game_id)
+        if not rows:
+            raise HTTPException(status_code=404, detail="Game not found or has no moves")
+        quiz_positions = _build_quiz_positions_from_rows(rows)
+
+    return {
+        "success": True,
+        "game_id": game_id,
+        "quiz_positions": quiz_positions
+    }
+
+@router.post("/games/{game_id}/quiz/results")
+async def submit_quiz_results(game_id: int, request: Request):
+    """
+    Evaluate quiz responses using Stockfish analysis.
+    
+    Request body (JSON):
+    {
+        "responses": [
+            {
+                "ply": 4,
+                "fen_before": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+                "expected_move": "Nc6",
+                "user_move": "b8c6"  # UCI format
+            },
+            ...
+        ],
+        "depth": 20,        // optional, default 20
+        "time_limit": 0.5   // optional, default 0.5 seconds
+    }
+    
+    Response:
+    {
+        "success": true,
+        "game_id": 1,
+        "total_questions": 5,
+        "correct_answers": 3,
+        "incorrect_answers": 2,
+        "score_percentage": 60,
+        "results": [
+            {
+                "ply": 4,
+                "expected_move": "Nc6",
+                "user_move": "Nc6",
+                "correct": true,
+                "feedback": "✓ Correct! This is Stockfish's best move.",
+                "stockfish": {
+                    "best_move": "Nc6",
+                    "score_cp": 35,
+                    "top_moves": ["Nc6", "d6", "c5"],
+                    "depth": 20
+                }
+            },
+            ...
+        ]
+    }
+    """
+    if not DB_ENABLED:
+        raise HTTPException(status_code=503, detail="Database not configured.")
+    
+    try:
+        from app.backend.services.quiz_results_service import evaluate_quiz_response
+        
+        # Parse request
+        data = await request.json()
+        responses = data.get("responses", [])
+        depth = int(data.get("depth", 20))
+        time_limit = float(data.get("time_limit", 0.5))
+        
+        if not responses:
+            raise HTTPException(status_code=400, detail="responses list is required")
+        
+        logger.info(f"Evaluating quiz for game {game_id} with {len(responses)} responses")
+        
+        # Evaluate quiz responses
+        result = await evaluate_quiz_response(
+            game_id=game_id,
+            responses=responses,
+            depth=depth,
+            time_limit=time_limit
+        )
+        
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error", "Quiz evaluation failed"))
+        
+        return result
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in quiz results endpoint: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Quiz evaluation failed: {str(e)}")

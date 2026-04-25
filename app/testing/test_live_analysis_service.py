@@ -1,4 +1,6 @@
-﻿from app.backend.services.live_analysis_service import parse_stockfish_line
+﻿from typing import cast
+
+from app.backend.services.live_analysis_service import parse_stockfish_line
 def test_parse_stockfish_line_parses_centipawn_eval() -> None:
     fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
     line = "info depth 20 seldepth 30 multipv 2 score cp 25 nodes 123456 pv e2e4 e7e5 g1f3"
@@ -21,4 +23,14 @@ def test_parse_stockfish_line_parses_mate_eval_and_truncates_pv() -> None:
     assert parsed["multipv"] == 1
     assert parsed["score_mate"] == 3
     assert parsed["best_move"] == "a1a2"
-    assert len(parsed["pv"].split()) == 10
+    pv = cast(str, parsed["pv"])
+    assert len(pv.split()) == 10
+
+
+def test_parse_stockfish_line_normalizes_black_to_move_score_to_white_perspective() -> None:
+    fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1"
+    line = "info depth 20 multipv 1 score cp 100 nodes 123 pv e7e5"
+    parsed = parse_stockfish_line(fen, line)
+    assert parsed["score_cp"] == -100
+
+

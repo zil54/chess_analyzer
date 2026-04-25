@@ -67,10 +67,10 @@
 
       <button
         type="button"
-        class="icon-btn future-btn"
-        title="Board Settings (future)"
+        class="icon-btn settings-btn"
+        title="Board Settings"
         aria-label="Board Settings"
-        disabled
+        @click="$emit('open-board-settings')"
       >
         <svg aria-hidden="true" viewBox="0 0 24 24" class="toolbar-icon" focusable="false">
           <circle cx="12" cy="12" r="3" />
@@ -104,7 +104,7 @@ export default {
     canAnalyze: { type: Boolean, required: true },
     isAnalyzing: { type: Boolean, required: true }
   },
-  emits: ['update:fen', 'render-board', 'start-analysis', 'stop-analysis', 'upload-pgn', 'flip-board']
+  emits: ['update:fen', 'render-board', 'start-analysis', 'stop-analysis', 'upload-pgn', 'flip-board', 'open-board-settings']
 };
 </script>
 
@@ -198,6 +198,11 @@ export default {
 .flip-btn {
   background: #ede9fe;
   color: #6d28d9;
+}
+
+.settings-btn {
+  background: #fff7ed;
+  color: #c2410c;
 }
 
 .future-btn {

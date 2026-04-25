@@ -51,11 +51,13 @@ export default {
 
 <style scoped>
 .moves-list {
-  padding: 8px 10px;
+  padding: 10px 12px;
   background-color: #f8f9fa;
   border-radius: 8px;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
   text-align: left;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .moves-list-title {
@@ -74,9 +76,10 @@ export default {
 
 .tree-block,
 .movetext-block {
-  padding: 8px;
-  max-height: 340px;
+  padding: 10px 12px;
+  max-height: 420px;
   overflow-y: auto;
+  overflow-x: visible;
   background: #fff;
   border: 1px solid #d0d7de;
   border-radius: 6px;
