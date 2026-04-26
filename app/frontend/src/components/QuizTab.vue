@@ -1,7 +1,7 @@
 ﻿<template>
   <div class="quiz-tab">
 
-    <!-- â”€â”€ Setup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+    <!-- ── Setup ──────────────────────────────────────────────────────────── -->
     <div v-if="!isQuizStarted && !quizResults && !isLoadingResults" class="quiz-setup">
       <h3>Quiz Mode</h3>
       <p v-if="positions.length === 0" class="no-positions">
@@ -14,7 +14,6 @@
           <div class="radio-group">
             <label><input type="radio" v-model="selectedColor" value="W"> White</label>
             <label><input type="radio" v-model="selectedColor" value="B"> Black</label>
-            <label><input type="radio" v-model="selectedColor" value="Both"> Both</label>
           </div>
         </div>
         <div class="setup-group">
@@ -22,13 +21,16 @@
           <input type="number" v-model.number="timeLimit" min="5" max="300" class="time-input">
         </div>
         <p class="quiz-info">{{ filteredPositions.length }} position(s) for your selection.</p>
-        <button class="btn-start" @click="startQuiz" :disabled="filteredPositions.length === 0">
+        <div v-if="hasUnsavedPGNChanges" class="unsaved-warning">
+          ⚠ Please save PGN changes first before starting quiz
+        </div>
+        <button class="btn-start" @click="startQuiz" :disabled="filteredPositions.length === 0 || hasUnsavedPGNChanges">
           Start Quiz
         </button>
       </div>
     </div>
 
-    <!-- â”€â”€ Active quiz â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+    <!-- ── Active quiz ────────────────────────────────────────────────────── -->
     <div v-else-if="isQuizStarted" class="quiz-active">
       <div class="quiz-header">
         <div class="quiz-progress">Position {{ currentIdx + 1 }} / {{ _quizPositions.length }}</div>
@@ -38,7 +40,7 @@
       <!-- Waiting for a move -->
       <template v-if="!isRevealed">
         <div class="quiz-instruction">Make your move on the board.</div>
-        <div class="quiz-idle-note">Stockfish analysis runs after you finish &mdash; not during quiz.</div>
+        <div class="quiz-idle-note">Stockfish analyzes while you think &mdash; results appear instantly.</div>
         <div class="quiz-controls">
           <button class="btn-stop" @click="stopQuiz">Stop Quiz</button>
           <button class="btn-skip" @click="skipPosition">Skip &rarr;</button>
@@ -63,14 +65,14 @@
       </template>
     </div>
 
-    <!-- â”€â”€ Loading â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+    <!-- ── Loading ────────────────────────────────────────────────────────── -->
     <div v-else-if="isLoadingResults" class="quiz-loading">
       <div class="loading-spinner"></div>
-      <p class="loading-text">Analyzing with Stockfish (3 lines)&hellip;</p>
-      <p class="loading-sub">Takes a few seconds per position</p>
+      <p class="loading-text">Compiling results from background analysis...</p>
+      <p class="loading-sub">Most positions were analyzed while you played</p>
     </div>
 
-    <!-- â”€â”€ Results â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+    <!-- ── Results ────────────────────────────────────────────────────────── -->
     <div v-else-if="quizResults" class="quiz-results">
 
       <!-- Score banner -->
@@ -111,6 +113,8 @@
           <div class="rcard-head">
             <span class="rcard-num rcard-num-click"
               @click="$emit('jump-to-ply', entry.ply)"
+              style="cursor: pointer; text-decoration: underline;"
+              title="Click to load this position in the board"
             >
               Position {{ idx + 1 }}
             </span>
@@ -154,44 +158,39 @@
                 </div>
               </div>
 
-              <!-- Feedback line -->
-              <div v-if="entry.analysis" class="feedback-line">{{ entry.analysis.feedback }}</div>
-              <div v-else-if="!entry.attempted" class="feedback-line skipped-note">
-                Skipped &mdash; solution was <strong>{{ entry.expected_move_san }}</strong>
-              </div>
+               <!-- Feedback line -->
+               <div v-if="entry.analysis" class="feedback-line">{{ entry.analysis.feedback }}</div>
+               <div v-else-if="!entry.attempted" class="feedback-line skipped-note">
+                 Skipped &mdash; solution was <strong>{{ entry.expected_move_san }}</strong>
+               </div>
 
-          <!-- 3 SF evaluation lines -->
-              <template v-if="entry.analysis && entry.analysis.stockfish.lines && entry.analysis.stockfish.lines.length">
-                <div class="sf-title">SF Lines (depth {{ entry.analysis.stockfish.depth }})</div>
-                <div class="sf-lines">
-                  <div
-                    v-for="(line, li) in entry.analysis.stockfish.lines"
-                    :key="li"
-                    class="sf-line-row"
-                    :class="{ 'sf-line-best': li === 0 }"
-                  >
-                    <span class="sf-eval-badge">{{ formatEval(line.score_cp, line.score_mate) }}</span>
-                    <span class="sf-nag-badge">{{ line.nag || evalToNag(line.score_cp, line.score_mate) }}</span>
-                    <span class="sf-pv">{{ line.pv_san }}</span>
-                  </div>
-                </div>
-              </template>
+               <!-- Eval swing display (show for any analyzed move with eval_swing_cp) -->
+               <div v-if="entry.analysis && entry.analysis.eval_swing_cp !== null && entry.analysis.eval_swing_cp !== undefined" class="eval-swing-info">
+                 <span class="eval-swing-label">Evaluation swing:</span>
+                 <span class="eval-swing-value">{{ entry.analysis.eval_swing_cp.toFixed(0) }} cp</span>
+               </div>
 
-            </div>
-          </div>
-        </div>
+             </div>
+           </div>
+         </div>
       </div>
 
       <div class="results-actions">
-        <button @click="redoQuiz"  class="btn-redo">&#8635; Redo Quiz</button>
-        <button @click="resetQuiz" class="btn-new">New Setup</button>
+        <button @click="saveQuizResults" :disabled="isSaving" class="btn-save">
+          {{ isSaving ? '💾 Saving...' : '💾 Save Results' }}
+        </button>
+        <button @click="exportToPDF" class="btn-export" title="Export results to PDF">
+          📄 Export to PDF
+        </button>
+        <button @click="redoQuiz" class="btn-redo">🔄 Redo Same Quiz</button>
+        <button @click="exitQuizMode" class="btn-exit">✕ Exit Quiz Mode</button>
       </div>
     </div>
 
-  </div>
+   </div>
 
-  <!-- â”€â”€ Fixed board tooltip (escapes overflow:auto clipping) â”€â”€â”€â”€â”€â”€â”€â”€ -->
-  <teleport to="body">
+   <!-- ── Fixed board tooltip (escapes overflow:auto clipping) ──────────── -->
+   <teleport to="body">
     <div
       v-if="hoveredPositionIdx !== null && quizResults && quizResults.entries[hoveredPositionIdx]"
       class="pos-tooltip-fixed"
@@ -207,7 +206,7 @@
 import { h } from 'vue';
 import { Chess } from 'chess.js';
 
-// â”€â”€â”€ MiniBoard: render-function component (no runtime compiler needed) â”€â”€â”€â”€â”€â”€â”€â”€
+// ── MiniBoard: render-function component (no runtime compiler needed) ────────
 const PIECE_UNICODE = {
   wK: '\u2654', wQ: '\u2655', wR: '\u2656', wB: '\u2657', wN: '\u2658', wP: '\u2659',
   bK: '\u265A', bQ: '\u265B', bR: '\u265C', bB: '\u265D', bN: '\u265E', bP: '\u265F',
@@ -247,7 +246,7 @@ const MiniBoard = {
           }, piece)] : []));
         }
       }
-    } catch { /* invalid FEN â€“ render empty board */ }
+    } catch { /* invalid FEN – render empty board */ }
     return h('div', {
       style: {
         display: 'flex', flexWrap: 'wrap',
@@ -266,12 +265,12 @@ export default {
     gameId:      { type: Number, required: false, default: null },
     apiBaseUrl:  { type: String, required: false, default: '' },
   },
-  emits: ['start-quiz', 'stop-quiz', 'show-position', 'quiz-finished', 'correct-move', 'jump-to-ply'],
+   emits: ['start-quiz', 'stop-quiz', 'show-position', 'quiz-finished', 'correct-move', 'jump-to-ply', 'quiz-mode-changed', 'flip-board'],
 
   data() {
     return {
       isQuizStarted: false,
-      selectedColor: 'Both',
+      selectedColor: 'W',
       timeLimit: 30,
       currentIdx: 0,
       timer: 0,
@@ -283,28 +282,68 @@ export default {
       // results
       quizResults: null,
       isLoadingResults: false,
+      isSaving: false,
+      // PGN save tracking
+      lastSavedGameId: null,
+      lastSavedPositionCount: 0,
       // snapshot of positions for this quiz run
       _quizPositions: [],
       // hover state for position tooltip
       hoveredPositionIdx: null,
       tooltipX: 0,
       tooltipY: 0,
+      // background analysis cache
+      analysisCache: {},   // keyed by ply, stores backend analysis results
+      analyzedPlies: new Set(),  // track which plies have been analyzed
     };
+  },
+
+  mounted() {
+    this.loadSavedQuizResults();
   },
 
   computed: {
     filteredPositions() {
-      if (this.selectedColor === 'Both') return this.positions;
+      if (this.selectedColor === 'Both' || this.selectedColor === 'W') {
+        return this.positions.filter(p => p.color === 'W');
+      }
       return this.positions.filter(p => p.color === this.selectedColor);
     },
     currentPosition() {
       return this._quizPositions[this.currentIdx] || null;
     },
+    hasUnsavedPGNChanges() {
+      // If we don't have a saved game ID yet, or if positions count changed, we need to save first
+      return this.gameId !== this.lastSavedGameId ||
+             this.positions.length !== this.lastSavedPositionCount;
+    },
   },
 
-  methods: {
-    // â”€â”€ Lifecycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    startQuiz() {
+  watch: {
+    positions(newPositions, oldPositions) {
+      // When positions change (new PGN uploaded), reset quiz results
+      if (JSON.stringify(newPositions) !== JSON.stringify(oldPositions)) {
+        this.quizResults = null;
+        this.isQuizStarted = false;
+        this.positionResults = {};
+        this.currentIdx = 0;
+        this.isRevealed = false;
+        this.submittedMoveSan = null;
+        this._quizPositions = [];
+      }
+    },
+    gameId(newGameId) {
+      // When game changes, mark that we need to save before starting new quiz
+      if (newGameId !== this.lastSavedGameId) {
+        this.quizResults = null;
+        this.isQuizStarted = false;
+      }
+    },
+  },
+
+   methods: {
+     // ── Lifecycle ──────────────────────────────────────────────────────────
+     startQuiz() {
       this._quizPositions   = [...this.filteredPositions];
       this.isQuizStarted    = true;
       this.currentIdx       = 0;
@@ -312,15 +351,25 @@ export default {
       this.submittedMoveSan = null;
       this.positionResults  = {};
       this.quizResults      = null;
+      // Flip board to match the selected color (Black flips the board)
+      if (this.selectedColor === 'B') {
+        this.$emit('flip-board');
+      }
       this.$emit('start-quiz');
+      this.$emit('quiz-mode-changed', { active: true });
       this.setupPosition();
-    },
+     },
 
-    stopQuiz() {
+     stopQuiz() {
       this.isQuizStarted = false;
       this.clearTimer();
+      // Reset board orientation when stopping quiz
+      if (this.selectedColor === 'B') {
+        this.$emit('flip-board');
+      }
       this.$emit('stop-quiz');
-    },
+      this.$emit('quiz-mode-changed', { active: false });
+     },
 
     setupPosition() {
       if (!this.currentPosition) return;
@@ -332,6 +381,9 @@ export default {
       this.timerInterval = setInterval(() => {
         this.timer > 0 ? this.timer-- : this.onTimeout();
       }, 1000);
+
+      // Start background analysis for this position while user thinks about move
+      this.analyzePositionInBackground();
     },
 
     clearTimer() {
@@ -343,8 +395,8 @@ export default {
       this.skipPosition();
     },
 
-    // â”€â”€ Move handling (called by Analyzer on user board move) â”€â”€â”€â”€
-    handleUserMove(moveSan) {
+     // ── Move handling (called by Analyzer on user board move) ────
+     handleUserMove(moveSan) {
       if (!this.isQuizStarted || this.isRevealed) return;
       const pos = this.currentPosition;
       if (!pos) return;
@@ -370,7 +422,7 @@ export default {
       if (isCorrect) this.$emit('correct-move');
     },
 
-    // Skip current position without answering â†’ go directly to next
+     // Skip current position without answering → go directly to next
     skipPosition() {
       if (!this.positionResults[this.currentIdx]) {
         const pos = this.currentPosition;
@@ -411,8 +463,8 @@ export default {
       this.submitQuizForAnalysis();
     },
 
-    // â”€â”€ Backend analysis â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    async submitQuizForAnalysis() {
+     // ── Backend analysis ──────────────────────────────────────────
+     async submitQuizForAnalysis() {
       const allEntries = this._quizPositions.map((pos, idx) => {
         return this.positionResults[idx] || {
           positionIndex: idx,
@@ -503,15 +555,17 @@ export default {
         total_credit:    Math.round(totalCredit * 100) / 100,
         entries: mergedEntries,
         error: (backendPayload.length === 0)
-          ? 'No moves played â€“ engine analysis unavailable.'
-          : (!this.gameId ? 'No game ID â€“ engine analysis unavailable.' : null),
+          ? 'No moves played – engine analysis unavailable.'
+          : (!this.gameId ? 'No game ID – engine analysis unavailable.' : null),
       };
 
+      // Keep tabs disabled throughout results screen (active: true maintains disabled state)
+      this.$emit('quiz-mode-changed', { active: true });
       this.$emit('quiz-finished', { completed: passCount, total: mergedEntries.length });
     },
 
-    // â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    onPositionHover(idx, e) {
+     // ── Helpers ────────────────────────────────────────────────────
+     onPositionHover(idx, e) {
       this.hoveredPositionIdx = idx;
       this.tooltipX = e.clientX + 18;
       this.tooltipY = Math.max(10, e.clientY - 90);
@@ -554,24 +608,29 @@ export default {
       if (scoreCp === null || scoreCp === undefined) return '?';
       const cp = scoreCp;
       if (Math.abs(cp) < 25)   return '=';
-      if (cp >= 25  && cp < 100)  return 'â©²';
-      if (cp <= -25 && cp > -100) return 'â©±';
-      if (cp >= 100 && cp < 300)  return 'Â±';
-      if (cp <= -100 && cp > -300) return 'âˆ“';
-      if (cp >= 300)  return '+âˆ’';
-      return 'âˆ’+';
+      if (cp >= 25  && cp < 100)  return '⩲';
+      if (cp <= -25 && cp > -100) return '⩱';
+      if (cp >= 100 && cp < 300)  return '±';
+      if (cp <= -100 && cp > -300) return '∓';
+      if (cp >= 300)  return '+−';
+      return '−+';
     },
 
-    redoQuiz() {
-      this.positionResults  = {};
-      this.quizResults      = null;
-      this.currentIdx       = 0;
-      this.isRevealed       = false;
-      this.submittedMoveSan = null;
-      this.isQuizStarted    = true;
-      this.$emit('start-quiz');
-      this.setupPosition();
-    },
+     redoQuiz() {
+       this.positionResults  = {};
+       this.quizResults      = null;
+       this.currentIdx       = 0;
+       this.isRevealed       = false;
+       this.submittedMoveSan = null;
+       this._quizPositions   = [...this.filteredPositions];
+       this.isQuizStarted    = true;
+       // Flip board to match the selected color (Black flips the board)
+       if (this.selectedColor === 'B') {
+         this.$emit('flip-board');
+       }
+       this.$emit('start-quiz');
+       this.setupPosition();
+     },
 
     resetQuiz() {
       this.positionResults  = {};
@@ -583,7 +642,146 @@ export default {
       this._quizPositions   = [];
     },
 
+     exitQuizMode() {
+       // Clear all quiz state and return to normal
+       this.positionResults  = {};
+       this.quizResults      = null;
+       this.currentIdx       = 0;
+       this.isQuizStarted    = false;
+       this.isRevealed       = false;
+       this.submittedMoveSan = null;
+       this._quizPositions   = [];
+       // Reset board orientation if it was flipped for Black
+       if (this.selectedColor === 'B') {
+         this.$emit('flip-board');
+       }
+       // Emit that we're exiting quiz mode (other tabs should be enabled)
+       this.$emit('quiz-mode-changed', { active: false });
+       // Reset board to starting position but keep PGN view at current move
+       this.$emit('show-position', 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1');
+     },
+
+    exportToPDF() {
+      // TODO: Implement PDF export
+      alert('📄 PDF export feature coming soon!');
+    },
+
+    markPGNSaved() {
+      // Call this from parent when PGN save is complete
+      this.lastSavedGameId = this.gameId;
+      this.lastSavedPositionCount = this.positions.length;
+    },
+
     setQuizResponses() {},  // compat stub
+
+    // ── Persistence methods ──
+    async loadSavedQuizResults() {
+      if (!this.gameId) return;
+      try {
+        const url = `${this.apiBaseUrl}/games/${this.gameId}/quiz/results`;
+        const resp = await fetch(url);
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.results && data.results.entries && data.results.entries.length > 0) {
+            this.quizResults = {
+              score_percentage: data.results.score_percentage,
+              pass_answers: 0,
+              full_answers: data.results.full_answers,
+              partial_answers: data.results.partial_answers,
+              fail_answers: data.results.fail_answers,
+              skipped_answers: data.results.skipped_answers,
+              total_questions: data.results.total_questions,
+              total_credit: data.results.total_credit,
+              entries: data.results.entries,
+              error: null,
+            };
+          }
+        }
+      } catch (err) {
+        console.warn('Could not load saved quiz results:', err);
+      }
+    },
+
+    async saveQuizResults() {
+      if (!this.gameId || !this.quizResults) {
+        alert('Cannot save: no game ID or no quiz results');
+        return;
+      }
+
+      this.isSaving = true;
+      try {
+        const url = `${this.apiBaseUrl}/games/${this.gameId}/quiz/results`;
+        const resp = await fetch(url, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            score_percentage: this.quizResults.score_percentage,
+            total_questions: this.quizResults.total_questions,
+            full_answers: this.quizResults.full_answers,
+            partial_answers: this.quizResults.partial_answers,
+            fail_answers: this.quizResults.fail_answers,
+            skipped_answers: this.quizResults.skipped_answers,
+            total_credit: this.quizResults.total_credit,
+            entries: this.quizResults.entries,
+          }),
+        });
+
+        if (resp.ok) {
+          const data = await resp.json();
+          alert('✓ Quiz results saved successfully!');
+          // Optionally reload to ensure UI reflects saved state
+          if (data.results) {
+            this.quizResults.entries = data.results.entries || this.quizResults.entries;
+          }
+        } else {
+          alert('✗ Failed to save quiz results');
+        }
+      } catch (err) {
+        console.error('Error saving quiz results:', err);
+        alert('✗ Error saving quiz results: ' + err.message);
+      } finally {
+        this.isSaving = false;
+      }
+    },
+
+    // ── Background analysis (runs during quiz) ────
+    async analyzePositionInBackground() {
+      const pos = this.currentPosition;
+      if (!pos || this.analyzedPlies.has(pos.ply) || !this.gameId) return;
+
+      // Mark as being analyzed to avoid duplicate requests
+      this.analyzedPlies.add(pos.ply);
+
+      try {
+        const url = `${this.apiBaseUrl}/games/${this.gameId}/quiz/results`;
+        const payload = {
+          responses: [{
+            ply: pos.ply,
+            fen_before: pos.fen_before,
+            expected_move: pos.expected_move_san,
+            user_move: this._sanToUci(pos.fen_before, pos.expected_move_san) || '',
+          }],
+          depth: 20,
+          time_limit: 0.6,
+        };
+
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.results && data.results.length > 0) {
+            this.analysisCache[pos.ply] = data.results[0];
+          }
+        }
+      } catch (err) {
+        console.warn('Background analysis failed for ply', pos.ply, err);
+      }
+    },
+
   },
 
   beforeUnmount() { this.clearTimer(); },
@@ -598,6 +796,7 @@ export default {
 .radio-group  { display: flex; gap: 14px; }
 .time-input   { width: 72px; }
 .quiz-info    { color: #555; font-size: 0.88em; margin: 0; }
+.unsaved-warning { color: #e65100; background: #fff3e0; padding: 8px 12px; border-radius: 4px; font-size: 0.88em; margin: 8px 0; border-left: 4px solid #ff9800; }
 .no-positions { color: #888; font-style: italic; }
 .btn-start { background: #1976d2; color: #fff; border: none; border-radius: 5px; padding: 10px 18px; font-weight: bold; cursor: pointer; width: 100%; }
 .btn-start:disabled { background: #bdbdbd; cursor: not-allowed; }
@@ -640,21 +839,25 @@ export default {
 .sd-fail    { color: #ef9a9a; }
 .sd-skip    { color: #b0bec5; }
 .results-error { padding: 8px 12px; background: #fff3e0; color: #e65100; border-radius: 4px; font-size: 0.88em; }
-.results-list  { display: flex; flex-direction: column; gap: 10px; max-height: 65vh; overflow-y: auto; }
+.results-list  { display: flex; flex-direction: column; gap: 12px; max-height: 70vh; overflow-y: auto; padding-right: 4px; }
+.results-list::-webkit-scrollbar { width: 8px; }
+.results-list::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 4px; }
+.results-list::-webkit-scrollbar-thumb { background: #bdbdbd; border-radius: 4px; }
+.results-list::-webkit-scrollbar-thumb:hover { background: #9e9e9e; }
 .rcard         { border: 1px solid #ddd; border-radius: 8px; padding: 10px 12px; background: #fafafa; }
 .rcard-pass    { border-left: 5px solid #43a047; background: #f1f8f5; }
 .rcard-partial { border-left: 5px solid #fbc02d; background: #fffde7; }
 .rcard-fail    { border-left: 5px solid #e53935; background: #fdf4f4; }
 .rcard-skipped { border-left: 5px solid #bdbdbd; background: #f5f5f5; }
-.rcard-head  { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.rcard-head  { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
 .rcard-num   { font-weight: bold; color: #1565c0; cursor: default; text-decoration: underline dotted #90caf9; user-select: none; }
-.rcard-badge { font-size: 0.8em; font-weight: bold; padding: 3px 8px; border-radius: 12px; }
+.rcard-badge { font-size: 0.8em; font-weight: bold; padding: 4px 10px; border-radius: 12px; }
 .badge-full    { background: #c8e6c9; color: #1b5e20; }
 .badge-partial { background: #fff9c4; color: #f57f17; }
 .badge-fail    { background: #ffcdd2; color: #b71c1c; }
 .badge-skipped { background: #e0e0e0; color: #616161; }
-.rcard-body      { display: flex; gap: 10px; align-items: flex-start; }
-.rcard-analysis  { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+.rcard-body      { display: flex; flex-direction: column; gap: 10px; }
+.rcard-analysis  { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
 .move-block { display: flex; flex-direction: column; gap: 3px; }
 .move-row   { display: flex; align-items: center; gap: 6px; }
 .mlabel     { min-width: 76px; font-weight: 600; color: #666; font-size: 0.85em; flex-shrink: 0; }
@@ -666,6 +869,9 @@ export default {
 .msan-none  { color: #999; font-style: italic; font-weight: normal; font-family: inherit; }
 .feedback-line { font-size: 0.85em; color: #333; line-height: 1.4; }
 .skipped-note  { color: #777; font-style: italic; }
+.eval-swing-info { font-size: 0.8em; padding: 6px 8px; background: #fff3e0; border-left: 3px solid #ff9800; border-radius: 3px; margin: 6px 0; display: flex; align-items: center; gap: 8px; }
+.eval-swing-label { font-weight: 600; color: #e65100; flex-shrink: 0; }
+.eval-swing-value { font-family: 'Courier New', monospace; font-weight: bold; color: #d84315; }
 .sf-title { font-size: 0.8em; font-weight: bold; color: #1565c0; margin-top: 2px; }
 .sf-lines { display: flex; flex-direction: column; gap: 3px; margin-top: 4px; }
 .sf-line-row { display: flex; gap: 6px; align-items: baseline; font-size: 0.8em; background: #f5f5f5; border-radius: 4px; padding: 3px 6px; }
@@ -674,9 +880,18 @@ export default {
 .sf-nag-badge  { flex-shrink: 0; font-weight: bold; min-width: 22px; font-size: 1em; color: #555; }
 .sf-pv         { color: #444; font-family: 'Courier New', monospace; font-size: 0.93em; word-break: break-word; }
 .results-actions { display: flex; gap: 10px; padding-top: 12px; border-top: 1px solid #e0e0e0; }
-.btn-redo, .btn-new { flex: 1; padding: 10px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+.btn-save, .btn-redo, .btn-new, .btn-export, .btn-exit { flex: 1; padding: 10px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; font-size: 0.9em; }
+.btn-save       { background: #1565c0; color: #fff; }
+.btn-save:hover { background: #1551b0; }
+.btn-save:disabled { background: #bdbdbd; cursor: not-allowed; }
 .btn-redo       { background: #1976d2; color: #fff; }
 .btn-redo:hover { background: #1565c0; }
+.btn-export     { background: #f57c00; color: #fff; }
+.btn-export:hover { background: #e65100; }
+.btn-exit       { background: #d32f2f; color: #fff; }
+.btn-exit:hover { background: #c62828; }
+.btn-new        { background: #757575; color: #fff; }
+.btn-new:hover  { background: #616161; }
 .btn-new        { background: #757575; color: #fff; }
 .btn-new:hover  { background: #616161; }
 </style>

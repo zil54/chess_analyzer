@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import importlib
 import os
 from typing import Optional, Any
@@ -73,15 +74,16 @@ async def get_connection():
     return await psycopg.AsyncConnection.connect(url, row_factory=dict_row)
 
 # -------------------------------------------------------------------
-# Schema initialization (3-table schema: games, moves, evals)
+# Schema initialization (4-table schema: games, moves, evals, analysis_lines)
 # -------------------------------------------------------------------
 async def init_db():
-    """Create the minimal schema used by the app.
+    """Create the schema used by the app.
 
     NOTE: This matches the current Postgres schema:
-      - games(id, raw_pgn, white, black, result, event, site, date)
-      - moves(id, game_id, ply, san, fen, comment, cp_tag, color generated)
-      - evals(fen pk, best_move, score_cp, score_mate, depth, pv, created_at)
+      - games(id, raw_pgn, white, black, result, event, site, date, pgn_source, imported_at, updated_at)
+      - moves(id, game_id, ply, san, fen, comment, cp_tag, color generated, variation_parent_id, variation_index, is_mainline, move_number, fen_before)
+      - evals(fen pk, best_move, score_cp, score_mate, depth, pv, created_at, engine, is_tablebase, game_id)
+      - analysis_lines(fen, depth, line_number pk, best_move, score_cp, score_mate, pv, updated_at)
 
     We use CREATE TABLE IF NOT EXISTS so it won't overwrite existing tables.
     """
@@ -97,7 +99,10 @@ async def init_db():
                     result TEXT,
                     event TEXT,
                     site TEXT,
-                    date TEXT
+                    date TEXT,
+                    pgn_source TEXT,
+                    imported_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                 );
                 """
             )
@@ -114,6 +119,11 @@ async def init_db():
                     color CHAR(1) GENERATED ALWAYS AS (
                         CASE WHEN ply % 2 = 1 THEN 'W' ELSE 'B' END
                     ) STORED,
+                    variation_parent_id BIGINT,
+                    variation_index INT,
+                    is_mainline BOOLEAN,
+                    move_number INT,
+                    fen_before TEXT,
                     UNIQUE (game_id, ply)
                 );
                 """
@@ -127,7 +137,10 @@ async def init_db():
                     score_mate INT,
                     depth INT,
                     pv TEXT,
-                    created_at TIMESTAMP DEFAULT NOW()
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    engine TEXT,
+                    is_tablebase BOOLEAN,
+                    game_id BIGINT
                 );
                 """
             )
@@ -147,6 +160,25 @@ async def init_db():
                 );
                 """
             )
+            await cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS public.quiz_results (
+                    id SERIAL PRIMARY KEY,
+                    game_id INT NOT NULL REFERENCES public.games(id),
+                    quiz_data JSONB NOT NULL,
+                    score_percentage INT,
+                    total_questions INT,
+                    full_answers INT,
+                    partial_answers INT,
+                    fail_answers INT,
+                    skipped_answers INT,
+                    total_credit FLOAT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(game_id)
+                );
+                """
+            )
         await conn.commit()
 
 
@@ -158,8 +190,8 @@ async def create_game(raw_pgn: str, headers: dict[str, str]) -> int:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
-                INSERT INTO public.games (raw_pgn, white, black, result, event, site, date)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO public.games (raw_pgn, white, black, result, event, site, date, pgn_source, imported_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
                 RETURNING id
                 """,
                 (
@@ -170,6 +202,7 @@ async def create_game(raw_pgn: str, headers: dict[str, str]) -> int:
                     headers.get("event"),
                     headers.get("site"),
                     headers.get("date"),
+                    headers.get("pgn_source"),
                 ),
             )
             row = await cur.fetchone()
@@ -194,6 +227,11 @@ async def insert_moves(game_id: int, moves: list[dict[str, Any]]) -> None:
             m["fen"],
             m.get("comment"),
             bool(m.get("cp_tag", False)),
+            m.get("variation_parent_id"),
+            m.get("variation_index"),
+            m.get("is_mainline"),
+            m.get("move_number"),
+            m.get("fen_before"),
         )
         for m in moves
     ]
@@ -204,8 +242,8 @@ async def insert_moves(game_id: int, moves: list[dict[str, Any]]) -> None:
             await cur.execute("DELETE FROM public.moves WHERE game_id = %s", (game_id,))
             await cur.executemany(
                 """
-                INSERT INTO public.moves (game_id, ply, san, fen, comment, cp_tag)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO public.moves (game_id, ply, san, fen, comment, cp_tag, variation_parent_id, variation_index, is_mainline, move_number, fen_before)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 records,
             )
@@ -217,7 +255,7 @@ async def get_moves(game_id: int) -> list[dict]:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
-                SELECT ply, san, fen, comment, cp_tag, color
+                SELECT ply, san, fen, comment, cp_tag, color, variation_parent_id, variation_index, is_mainline, move_number, fen_before
                 FROM public.moves
                 WHERE game_id = %s
                 ORDER BY ply ASC
@@ -288,6 +326,9 @@ async def upsert_eval(
     score_mate: int | None = None,
     depth: int | None = None,
     pv: str | None = None,
+    engine: str | None = None,
+    is_tablebase: bool | None = None,
+    game_id: int | None = None,
 ) -> None:
     """
     Insert or update evaluation for a FEN position.
@@ -325,17 +366,20 @@ async def upsert_eval(
                 # Insert or update
                 await cur.execute(
                     """
-                    INSERT INTO public.evals (fen, best_move, score_cp, score_mate, depth, pv)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    INSERT INTO public.evals (fen, best_move, score_cp, score_mate, depth, pv, engine, is_tablebase, game_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (fen) DO UPDATE SET
                         best_move = EXCLUDED.best_move,
                         score_cp = EXCLUDED.score_cp,
                         score_mate = EXCLUDED.score_mate,
                         depth = EXCLUDED.depth,
                         pv = EXCLUDED.pv,
+                        engine = EXCLUDED.engine,
+                        is_tablebase = EXCLUDED.is_tablebase,
+                        game_id = EXCLUDED.game_id,
                         created_at = NOW()
                     """,
-                    (fen, best_move, score_cp, score_mate, depth, pv),
+                    (fen, best_move, score_cp, score_mate, depth, pv, engine, is_tablebase, game_id),
                 )
                 logger.info("[OK] Upsert query executed")
             await conn.commit()
@@ -556,13 +600,111 @@ async def get_eval(fen: str) -> Optional[dict]:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
-                SELECT fen, best_move, score_cp, score_mate, depth, pv, created_at
+                SELECT fen, best_move, score_cp, score_mate, depth, pv, created_at, engine, is_tablebase, game_id
                 FROM public.evals
                 WHERE fen = %s
                 """,
                 (fen,),
             )
             return await cur.fetchone()
+
+
+# -------------------------------------------------------------------
+# Quiz results helpers
+# -------------------------------------------------------------------
+async def save_quiz_results(game_id: int, quiz_results: dict[str, Any]) -> dict:
+    """Save or update quiz results for a game."""
+    import json
+    async with await get_connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO public.quiz_results (
+                    game_id, quiz_data, score_percentage, total_questions,
+                    full_answers, partial_answers, fail_answers, skipped_answers, total_credit
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (game_id) DO UPDATE SET
+                    quiz_data = EXCLUDED.quiz_data,
+                    score_percentage = EXCLUDED.score_percentage,
+                    total_questions = EXCLUDED.total_questions,
+                    full_answers = EXCLUDED.full_answers,
+                    partial_answers = EXCLUDED.partial_answers,
+                    fail_answers = EXCLUDED.fail_answers,
+                    skipped_answers = EXCLUDED.skipped_answers,
+                    total_credit = EXCLUDED.total_credit,
+                    updated_at = NOW()
+                RETURNING id, created_at, updated_at
+                """,
+                (
+                    game_id,
+                    json.dumps(quiz_results.get("entries", [])),
+                    quiz_results.get("score_percentage"),
+                    quiz_results.get("total_questions"),
+                    quiz_results.get("full_answers"),
+                    quiz_results.get("partial_answers"),
+                    quiz_results.get("fail_answers"),
+                    quiz_results.get("skipped_answers"),
+                    quiz_results.get("total_credit"),
+                ),
+            )
+            row = await cur.fetchone()
+        await conn.commit()
+    return row or {}
+
+
+async def get_quiz_results(game_id: int) -> Optional[dict]:
+    """Retrieve saved quiz results for a game."""
+    async with await get_connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT id, game_id, quiz_data, score_percentage, total_questions,
+                       full_answers, partial_answers, fail_answers, skipped_answers,
+                       total_credit, created_at, updated_at
+                FROM public.quiz_results
+                WHERE game_id = %s
+                """,
+                (game_id,),
+            )
+            row = await cur.fetchone()
+
+    if not row:
+        return None
+
+    import json
+    try:
+        entries = json.loads(row.get("quiz_data", "[]"))
+    except:
+        entries = []
+
+    return {
+        "id": row.get("id"),
+        "game_id": row.get("game_id"),
+        "score_percentage": row.get("score_percentage"),
+        "total_questions": row.get("total_questions"),
+        "full_answers": row.get("full_answers"),
+        "partial_answers": row.get("partial_answers"),
+        "fail_answers": row.get("fail_answers"),
+        "skipped_answers": row.get("skipped_answers"),
+        "total_credit": row.get("total_credit"),
+        "entries": entries,
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+async def delete_quiz_results(game_id: int) -> int:
+    """Delete quiz results for a game."""
+    async with await get_connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "DELETE FROM public.quiz_results WHERE game_id = %s",
+                (game_id,),
+            )
+            rows_deleted = cur.rowcount
+        await conn.commit()
+    return rows_deleted
 
 
 # -------------------------------------------------------------------

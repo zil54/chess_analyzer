@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Analyzer Service: Chess position analysis with caching
 
