@@ -52,17 +52,17 @@
       <!-- RIGHT SECTION: Tabs -->
       <aside class="right-panel">
         <div class="tabs-header">
-          <button :class="{active: activeTab === 'PGN'}" @click="activeTab = 'PGN'" :disabled="isQuizActive">
+          <button :class="{active: activeTab === 'PGN'}" @click="activeTab = 'PGN'" :disabled="isQuizActive || quizModeDisablesOtherTabs">
             PGN<span v-if="hasUnsavedChanges"> *</span>
           </button>
           <button
             :class="{active: activeTab === 'Games'}"
             @click="activeTab = 'Games'"
-            :disabled="sessionGames.length === 0 || isQuizActive"
+            :disabled="sessionGames.length === 0 || isQuizActive || quizModeDisablesOtherTabs"
           >
             Games ({{sessionGames.length}})
           </button>
-          <button :class="{active: activeTab === 'Analysis'}" @click="activeTab = 'Analysis'" :disabled="isQuizActive">Analysis</button>
+          <button :class="{active: activeTab === 'Analysis'}" @click="activeTab = 'Analysis'" :disabled="isQuizActive || quizModeDisablesOtherTabs">Analysis</button>
           <button
             :class="{active: activeTab === 'Quiz'}"
             @click="activeTab = 'Quiz'"
@@ -103,7 +103,7 @@
                 :disabled="quizPositions.length === 0"
               >
                 <span v-if="quizPositions.length > 0">
-                  🎯 Start Critical Position Quiz ({{ quizPositions.length }})
+                   Start Critical Position Quiz ({{ quizPositions.length }})
                 </span>
                 <span v-else>
                   ❌ No Critical Positions (add {CPosition} in comments)
@@ -130,19 +130,20 @@
           />
         </div>
 
-        <div class="tab-content" v-show="activeTab === 'Quiz'">
-          <QuizTab
-            ref="quizTab"
-            :positions="quizPositions"
-            :gameId="gameId"
-            :apiBaseUrl="getApiBaseUrl()"
-            @start-quiz="handleStartQuiz"
-            @stop-quiz="handleStopQuiz"
-            @show-position="handleQuizShowPosition"
-            @quiz-finished="handleQuizFinished"
-            @jump-to-ply="jumpToQuizPly"
-          />
-        </div>
+         <div class="tab-content" v-show="activeTab === 'Quiz'">
+           <QuizTab
+             ref="quizTab"
+             :positions="quizPositions"
+             :gameId="gameId"
+             :apiBaseUrl="getApiBaseUrl()"
+             @start-quiz="handleStartQuiz"
+             @stop-quiz="handleStopQuiz"
+             @show-position="handleQuizShowPosition"
+             @quiz-finished="handleQuizFinished"
+             @quiz-mode-changed="handleQuizModeChanged"
+             @flip-board="flipBoard"
+           />
+         </div>
       </aside>
     </div>
   </div>
@@ -259,6 +260,7 @@ export default {
 
        quizPositions: [],
        isQuizActive: false,
+       quizModeDisablesOtherTabs: false,
     };
   },
 
@@ -502,12 +504,31 @@ export default {
       }
 
       const positions = Array.isArray(this.pgnData.positions) ? this.pgnData.positions : [];
-      if (positions.length <= 1) {
+      if (positions.length === 0) {
         return [];
       }
 
-      if (this.pgnData?.variation_tree && Array.isArray(this.pgnData.mainline_node_ids) && this.pgnData.mainline_node_ids.length > 1) {
+      if (this.pgnData?.variation_tree && Array.isArray(this.pgnData.mainline_node_ids) && this.pgnData.mainline_node_ids.length > 0) {
         const quizPositions = [];
+        // Check starting position (ply = 0) for critical position
+        const rootNode = this.pgnData.variation_tree;
+        if (rootNode && (Boolean(rootNode.cp_tag) || this.commentHasCriticalPosition(rootNode.comment))) {
+          // Starting position is marked critical, quiz should start from first move
+          if (this.pgnData.mainline_node_ids.length > 1) {
+            const firstNodeId = this.pgnData.mainline_node_ids[1];
+            const firstNode = this.treeNodeMap[firstNodeId];
+            if (firstNode && positions[0]) {
+              quizPositions.push({
+                ply: 1,
+                fen_before: positions[0].fen,
+                expected_move_san: firstNode.san,
+                color: this.normalizeQuizColor(firstNode.color),
+                comment: rootNode.comment || null,
+              });
+            }
+          }
+        }
+        // Continue with remaining nodes
         for (let ply = 1; ply < this.pgnData.mainline_node_ids.length; ply += 1) {
           const nodeId = this.pgnData.mainline_node_ids[ply];
           const node = this.treeNodeMap[nodeId];
@@ -535,6 +556,23 @@ export default {
       }
 
       const quizPositions = [];
+      // Check starting position (ply = 0) for critical position
+      if (positions[0] && (Boolean(positions[0].cp_tag) || this.commentHasCriticalPosition(positions[0].comment))) {
+        // Starting position is marked critical, quiz should start from first move
+        if (positions.length > 1) {
+          const firstPosition = positions[1];
+          if (firstPosition) {
+            quizPositions.push({
+              ply: 1,
+              fen_before: positions[0].fen,
+              expected_move_san: firstPosition.san,
+              color: this.normalizeQuizColor(firstPosition.color),
+              comment: positions[0].comment || null,
+            });
+          }
+        }
+      }
+      // Continue with remaining positions
       for (let ply = 1; ply < positions.length; ply += 1) {
         const position = positions[ply];
         if (!position) continue;
@@ -588,35 +626,20 @@ export default {
       this.isQuizActive = false;
     },
 
-    async jumpToQuizPly(plyTarget) {
-      if (!this.pgnData) return;
-      // Switch to PGN tab first and wait for render
-      this.activeTab = 'PGN';
-      await this.$nextTick();
-
-      let targetNodeId = null;
-
-      // Primary path: ply stored in quiz positions is an index into mainline_node_ids
-      const nodeIds = this.pgnData.mainline_node_ids;
-      if (Array.isArray(nodeIds) && plyTarget >= 0 && plyTarget < nodeIds.length) {
-        targetNodeId = nodeIds[plyTarget];
-      }
-
-      // Fallback: search every tree node for a matching .ply property
-      if (targetNodeId == null) {
-        for (const node of Object.values(this.treeNodeMap)) {
-          if (node && node.ply === plyTarget) {
-            targetNodeId = node.id;
-            break;
-          }
+    handleQuizModeChanged(event) {
+      // Keep all tabs disabled throughout entire quiz (including results screen)
+      // Only re-enable tabs when user explicitly exits quiz mode
+      this.quizModeDisablesOtherTabs = event.active;
+      if (event.active) {
+        this.activeTab = 'Quiz'; // Force tab to stay on Quiz
+      } else {
+        // When exiting quiz, reset to the starting position of the PGN
+        this.currentMove = 0;
+        if (this.pgnData && this.pgnData.positions && this.pgnData.positions[0]) {
+          this.fen = this.pgnData.positions[0].fen;
         }
       }
-
-      if (targetNodeId != null) {
-        await this.selectTreeNode(targetNodeId);
-      }
     },
-
     getContinuationChild(node) {
       const variations = Array.isArray(node?.variations) ? node.variations : [];
       return variations.find((variation) => variation?.is_mainline) || variations[0] || null;
@@ -775,6 +798,7 @@ export default {
     },
 
     async onUserMove(moveInfo) {
+      // During active quiz, all moves go through quiz handler
       if (this.isQuizActive) {
         const quizTab = this.$refs.quizTab;
         const fenBefore = this.fen;
@@ -786,9 +810,18 @@ export default {
             promotion: moveInfo.promotion || 'q'
           });
           if (moveResult) {
-            this.fen = moveResult.fen;  // Show the move on board — stays there, quiz gives feedback
+            this.fen = moveResult.fen;  // Show the move on board
             if (quizTab) {
               quizTab.handleUserMove(moveResult.san);
+              // If move was wrong (quiz didn't reveal), reset board back to quiz position
+              // after a short delay so user can see what they played
+              if (!quizTab.isRevealed) {
+                setTimeout(() => {
+                  if (this.isQuizActive && !quizTab.isRevealed) {
+                    this.fen = fenBefore;
+                  }
+                }, 600);
+              }
             }
           }
         } catch (err) {
@@ -796,99 +829,114 @@ export default {
         }
         return;
       }
+
+      // During analysis (not quiz), allow moves and update analysis
       if (!this.pgnData || !this.pgnData.variation_tree) {
         this.fen = moveInfo.fen;
         if (this.socket) this.analyzeLive();
         return;
       }
 
-      const currentFen = typeof this.fen === 'string' ? this.fen : '';
-      const matchedNode = Object.values(this.treeNodeMap).find((node) => node?.fen === currentFen) || null;
-      const parentNode = (this.currentTreeNode?.fen === currentFen ? this.currentTreeNode : matchedNode) || this.currentTreeNode || this.pgnData.variation_tree;
-      const parentNodeId = Number.isInteger(parentNode.id) ? parentNode.id : 0;
-      const parentFen = parentNode?.fen || currentFen;
-      const fenParts = typeof parentFen === 'string' ? parentFen.trim().split(/\s+/) : [];
-      const parentTurn = fenParts[1] === 'b' ? 'b' : 'w';
-      const parentFullmove = parseInt(fenParts[5], 10) || 1;
-      const parentMainlineIndex = Number.isInteger(parentNode.mainline_index)
-        ? parentNode.mainline_index
-        : (Number.isInteger(parentNode.anchor_mainline_index) ? parentNode.anchor_mainline_index : this.currentMove);
+      // If PGN with variations is loaded, handle move with variation tree
+      try {
+        const currentFen = typeof this.fen === 'string' ? this.fen : '';
+        const matchedNode = Object.values(this.treeNodeMap).find((node) => node?.fen === currentFen) || null;
+        const parentNode = (this.currentTreeNode?.fen === currentFen ? this.currentTreeNode : matchedNode) || this.currentTreeNode || this.pgnData.variation_tree;
+        const parentNodeId = Number.isInteger(parentNode.id) ? parentNode.id : 0;
+        const parentFen = parentNode?.fen || currentFen;
+        const fenParts = typeof parentFen === 'string' ? parentFen.trim().split(/\s+/) : [];
+        const parentTurn = fenParts[1] === 'b' ? 'b' : 'w';
+        const parentFullmove = parseInt(fenParts[5], 10) || 1;
+        const parentMainlineIndex = Number.isInteger(parentNode.mainline_index)
+          ? parentNode.mainline_index
+          : (Number.isInteger(parentNode.anchor_mainline_index) ? parentNode.anchor_mainline_index : this.currentMove);
 
-      // Extract algebraic notation
-      let san = moveInfo.san;
-      if (!san) {
+        // Extract algebraic notation
+       let san = moveInfo.san;
+       if (!san) {
+         try {
+           const chess = new Chess(this.fen);
+           const moveResult = chess.move({
+             from: moveInfo.from,
+             to: moveInfo.to,
+             promotion: moveInfo.promotion || 'q'
+           });
+           if (moveResult) {
+             san = moveResult.san;
+             this.fen = moveResult.fen; // Show the move on board
+             if (this.$refs.quizTab) {
+               this.$refs.quizTab.handleUserMove(san);
+             }
+           }
+         } catch (err) {
+           console.warn("Invalid user move recalculation", err);
+           san = null;
+         }
+       }
+
+       if (!san) return;
+
+       // Check if this move already exists in variations
+       if (parentNode.variations && Array.isArray(parentNode.variations)) {
+         const existingMove = parentNode.variations.find(v => v.san === san && v.fen === moveInfo.fen);
+         if (existingMove) {
+           // Move already exists, just navigate to it
+           await this.selectTreeNode(existingMove.id);
+           return;
+         }
+       }
+
+       // Create new variation node for this move
+       const newPly = Number.isInteger(parentNode.ply)
+         ? parentNode.ply + 1
+         : ((parentFullmove - 1) * 2) + (parentTurn === 'w' ? 1 : 2);
+       const newColor = parentTurn;
+       const newMoveNumber = parentFullmove;
+
+       const newId = this.generateNewNodeId();
+       const newNode = {
+         id: newId,
+         san: san,
+         move: moveInfo.promotion ? `${moveInfo.from}${moveInfo.to}${moveInfo.promotion}` : `${moveInfo.from}${moveInfo.to}`,
+         fen: moveInfo.fen,
+         ply: newPly,
+         color: newColor,
+         move_number: newMoveNumber,
+         comment: null,
+         starting_comment: null,
+         nags: [],
+         nag_symbols: [],
+         nag_display: null,
+         is_mainline: false,
+         mainline_index: null,
+         anchor_mainline_index: parentMainlineIndex,
+         variations: []
+       };
+
+       if (!parentNode.variations) parentNode.variations = [];
+       parentNode.variations.push(newNode);
+
+       if (!this.hasUnsavedChanges) {
+         this.hasUnsavedChanges = true;
+         this.backupTreeNodeId = parentNodeId;
+         this.unsavedNodeIds = [];
+       }
+       this.unsavedNodeIds.push(newId);
+
+       // Force Vue to recognize deep reactivity by replacing array
+       parentNode.variations = [...parentNode.variations];
+
+       await this.selectTreeNode(newId);
+      } catch (err) {
+        console.error('Error processing move:', err);
+        // Fallback: just apply the move to the board
         try {
-          const chess = new Chess(this.fen);
-          const moveResult = chess.move({
-            from: moveInfo.from,
-            to: moveInfo.to,
-            promotion: moveInfo.promotion || 'q'
-          });
-          if (moveResult) {
-            san = moveResult.san;
-            this.fen = moveResult.fen; // Show the move on board
-            if (this.$refs.quizTab) {
-              this.$refs.quizTab.handleUserMove(san);
-            }
-          }
-        } catch (err) {
-          console.warn("Invalid user move recalculation", err);
-          san = null;
+          this.fen = moveInfo.fen;
+          if (this.socket) this.analyzeLive();
+        } catch (e) {
+          console.warn('Fallback move failed:', e);
         }
       }
-
-      if (!san) return;
-
-      // Check if this move already exists in variations
-      if (parentNode.variations && Array.isArray(parentNode.variations)) {
-        const existingMove = parentNode.variations.find(v => v.san === san && v.fen === moveInfo.fen);
-        if (existingMove) {
-          // Move already exists, just navigate to it
-          await this.selectTreeNode(existingMove.id);
-          return;
-        }
-      }
-
-      const newPly = Number.isInteger(parentNode.ply)
-        ? parentNode.ply + 1
-        : ((parentFullmove - 1) * 2) + (parentTurn === 'w' ? 1 : 2);
-      const newColor = parentTurn;
-      const newMoveNumber = parentFullmove;
-
-      const newId = this.generateNewNodeId();
-      const newNode = {
-        id: newId,
-        san: san,
-        move: moveInfo.promotion ? `${moveInfo.from}${moveInfo.to}${moveInfo.promotion}` : `${moveInfo.from}${moveInfo.to}`,
-        fen: moveInfo.fen,
-        ply: newPly,
-        color: newColor,
-        move_number: newMoveNumber,
-        comment: null,
-        starting_comment: null,
-        nags: [],
-        nag_symbols: [],
-        nag_display: null,
-        is_mainline: false,
-        mainline_index: null,
-        anchor_mainline_index: parentMainlineIndex,
-        variations: []
-      };
-
-      if (!parentNode.variations) parentNode.variations = [];
-      parentNode.variations.push(newNode);
-
-      if (!this.hasUnsavedChanges) {
-        this.hasUnsavedChanges = true;
-        this.backupTreeNodeId = parentNodeId;
-        this.unsavedNodeIds = [];
-      }
-      this.unsavedNodeIds.push(newId);
-
-      // Force Vue to recognize deep reactivity by replacing array
-      parentNode.variations = [...parentNode.variations];
-
-      await this.selectTreeNode(newId);
     },
 
     updateNodeNags({ nodeId, nags }) {
@@ -981,6 +1029,10 @@ export default {
       this.unsavedNodeIds = [];
       this.backupTreeNodeId = null;
       this.refreshQuizPositions();
+      // Notify QuizTab that PGN has been saved
+      if (this.$refs.quizTab && this.$refs.quizTab.markPGNSaved) {
+        this.$refs.quizTab.markPGNSaved();
+      }
       // Deselect current node to close inline editor
       this.currentTreeNodeId = 0;
     },

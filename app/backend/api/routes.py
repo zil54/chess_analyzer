@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from fastapi import APIRouter, HTTPException, Request, Response
 import chess
 import chess.pgn
@@ -13,6 +14,9 @@ try:
         get_game_raw_pgn,
         get_eval,
         update_move_annotations,
+        save_quiz_results,
+        get_quiz_results,
+        delete_quiz_results,
         DB_ENABLED,
     )
 except Exception:
@@ -21,10 +25,6 @@ except Exception:
     async def update_move_annotations(game_id: int, annotations: list[dict]):
         return 0
 
-try:
-    from app.backend.db.db import fetch_quiz_positions
-except ImportError:
-    async def fetch_quiz_positions(game_id: int): return []
 
 # Logger (fallback to stdlib if app logger isn't available)
 try:
@@ -488,13 +488,18 @@ def _parse_pgn_payload(pgn_str: str) -> tuple[dict, list[dict], list[dict], int,
             "fen": board.fen(),
             "comment": None,
             "cp_tag": False,
+            "fen_before": None,
+            "move_number": 0,
+            "is_mainline": True,
         }]
 
         ply = 0
         node = game
+        prev_fen = board.fen()
         for move in game.mainline_moves():
             ply += 1
             san = board.san(move)
+            prev_fen = board.fen()  # Store FEN before push
             board.push(move)
 
             try:
@@ -519,6 +524,9 @@ def _parse_pgn_payload(pgn_str: str) -> tuple[dict, list[dict], list[dict], int,
                 "fen": board.fen(),
                 "comment": comment,
                 "cp_tag": is_cp,
+                "fen_before": prev_fen,
+                "move_number": board.fullmove_number,
+                "is_mainline": True,
             })
             _annotate_position_from_node(move_rows[-1], node)
 
@@ -778,7 +786,8 @@ async def save_game_annotations(game_id: int, request: Request):
     if not isinstance(annotations, list):
         raise HTTPException(status_code=400, detail="annotations must be a list")
 
-    valid_plies = {int(row["ply"]) for row in rows if int(row.get("ply", 0)) > 0}
+    # Include ply = 0 (starting position) if it exists, and all moves (ply > 0)
+    valid_plies = {int(row["ply"]) for row in rows}
     normalized_annotations = []
     for item in annotations:
         if not isinstance(item, dict):
@@ -1010,12 +1019,10 @@ async def get_quiz_data(game_id: int):
     if not DB_ENABLED:
         raise HTTPException(status_code=503, detail="Database not configured.")
 
-    quiz_positions = await fetch_quiz_positions(game_id)
-    if not quiz_positions:
-        rows = await get_moves(game_id)
-        if not rows:
-            raise HTTPException(status_code=404, detail="Game not found or has no moves")
-        quiz_positions = _build_quiz_positions_from_rows(rows)
+    rows = await get_moves(game_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Game not found or has no moves")
+    quiz_positions = _build_quiz_positions_from_rows(rows)
 
     return {
         "success": True,
@@ -1023,11 +1030,95 @@ async def get_quiz_data(game_id: int):
         "quiz_positions": quiz_positions
     }
 
+@router.get("/games/{game_id}/quiz/results")
+async def get_quiz_results_endpoint(game_id: int):
+    """
+    Retrieve previously saved quiz results for a game.
+
+    Response: quiz results object or null if no results saved
+    """
+    if not DB_ENABLED:
+        raise HTTPException(status_code=503, detail="Database not configured.")
+
+    try:
+        results = await get_quiz_results(game_id)
+        return {
+            "success": True,
+            "game_id": game_id,
+            "results": results
+        }
+    except Exception as e:
+        logger.error(f"Error retrieving quiz results: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve quiz results: {str(e)}")
+
+
+@router.put("/games/{game_id}/quiz/results")
+async def save_quiz_results_endpoint(game_id: int, request: Request):
+    """
+    Save quiz results for a game to the database.
+
+    Request body (JSON):
+    {
+        "score_percentage": 80,
+        "total_questions": 5,
+        "full_answers": 4,
+        "partial_answers": 0,
+        "fail_answers": 1,
+        "skipped_answers": 0,
+        "total_credit": 4.0,
+        "entries": [...]  // full entries array from quiz results
+    }
+
+    Response: success confirmation with saved data
+    """
+    if not DB_ENABLED:
+        raise HTTPException(status_code=503, detail="Database not configured.")
+
+    try:
+        data = await request.json()
+
+        result = await save_quiz_results(game_id, data)
+
+        # Retrieve the saved results to return them
+        saved = await get_quiz_results(game_id)
+
+        return {
+            "success": True,
+            "game_id": game_id,
+            "message": "Quiz results saved successfully",
+            "results": saved
+        }
+    except Exception as e:
+        logger.error(f"Error saving quiz results: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to save quiz results: {str(e)}")
+
+
+@router.delete("/games/{game_id}/quiz/results")
+async def delete_quiz_results_endpoint(game_id: int):
+    """
+    Delete saved quiz results for a game.
+    """
+    if not DB_ENABLED:
+        raise HTTPException(status_code=503, detail="Database not configured.")
+
+    try:
+        rows_deleted = await delete_quiz_results(game_id)
+        return {
+            "success": True,
+            "game_id": game_id,
+            "deleted": rows_deleted > 0,
+            "message": f"Deleted {rows_deleted} quiz result record(s)"
+        }
+    except Exception as e:
+        logger.error(f"Error deleting quiz results: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to delete quiz results: {str(e)}")
+
+
 @router.post("/games/{game_id}/quiz/results")
 async def submit_quiz_results(game_id: int, request: Request):
     """
     Evaluate quiz responses using Stockfish analysis.
-    
+
     Request body (JSON):
     {
         "responses": [
@@ -1042,7 +1133,7 @@ async def submit_quiz_results(game_id: int, request: Request):
         "depth": 20,        // optional, default 20
         "time_limit": 0.5   // optional, default 0.5 seconds
     }
-    
+
     Response:
     {
         "success": true,
@@ -1071,21 +1162,21 @@ async def submit_quiz_results(game_id: int, request: Request):
     """
     if not DB_ENABLED:
         raise HTTPException(status_code=503, detail="Database not configured.")
-    
+
     try:
         from app.backend.services.quiz_results_service import evaluate_quiz_response
-        
+
         # Parse request
         data = await request.json()
         responses = data.get("responses", [])
         depth = int(data.get("depth", 20))
         time_limit = float(data.get("time_limit", 0.5))
-        
+
         if not responses:
             raise HTTPException(status_code=400, detail="responses list is required")
-        
+
         logger.info(f"Evaluating quiz for game {game_id} with {len(responses)} responses")
-        
+
         # Evaluate quiz responses
         result = await evaluate_quiz_response(
             game_id=game_id,
@@ -1093,12 +1184,12 @@ async def submit_quiz_results(game_id: int, request: Request):
             depth=depth,
             time_limit=time_limit
         )
-        
+
         if not result.get("success"):
             raise HTTPException(status_code=400, detail=result.get("error", "Quiz evaluation failed"))
-        
+
         return result
-    
+
     except HTTPException:
         raise
     except Exception as e:

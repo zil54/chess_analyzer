@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Quiz Results Service: Evaluate and compare user moves with Stockfish analysis
 """
@@ -18,112 +19,6 @@ except Exception as e:
 
     async def get_moves(game_id: int):
         return []
-
-
-def _uci_pv_to_san(fen: str, uci_pv_str: str) -> str:
-    """Convert a space-separated UCI move string to SAN with proper move numbers."""
-    if not uci_pv_str:
-        return ""
-    try:
-        board = chess.Board(fen)
-        parts = []
-        move_num = board.fullmove_number
-        is_white = board.turn == chess.WHITE
-        for i, uci in enumerate(uci_pv_str.split()[:8]):
-            try:
-                move = chess.Move.from_uci(uci)
-                san = board.san(move)
-                if is_white:
-                    parts.append(f"{move_num}. {san}")
-                else:
-                    if i == 0:
-                        parts.append(f"{move_num}...{san}")
-                    else:
-                        parts.append(san)
-                board.push(move)
-                is_white = board.turn == chess.WHITE
-                if is_white:
-                    move_num += 1
-            except Exception:
-                break
-        return " ".join(parts)
-    except Exception:
-        return uci_pv_str
-
-
-def _run_multipv_fallback_session(fen: str, depth: int, time_limit: float, num_lines: int, stockfish_path: str) -> List[Dict]:
-    """
-    Fallback MultiPV analysis using a raw UCI session when chess.engine is unavailable.
-    Sends MultiPV=num_lines, collects the best info line per multipv index, then converts
-    the UCI PV to SAN with proper move numbers.
-    """
-    from app.engine.stockfish_session import StockfishSession
-    from app.backend.services.stockfish_parser import parse_stockfish_line
-    from app.backend.services.analyzer_service import _build_go_command
-
-    session = StockfishSession(stockfish_path)
-    # Store the latest info line per multipv rank (1-based)
-    latest_by_multipv: Dict[int, Dict] = {}
-
-    try:
-        session.send("uci")
-        session.send("isready")
-        for line in session.read_lines():
-            if line == "readyok":
-                break
-
-        session.send("ucinewgame")
-        session.send("setoption name UCI_AnalyseMode value true")
-        session.send(f"setoption name MultiPV value {num_lines}")
-        session.send(f"position fen {fen}")
-        session.send(_build_go_command(depth, time_limit))
-
-        for line in session.read_lines():
-            if line.startswith("bestmove"):
-                break
-            parsed = parse_stockfish_line(fen, line)
-            if parsed.get("pv"):
-                mpv_idx = parsed.get("multipv", 1)
-                latest_by_multipv[mpv_idx] = parsed
-
-    finally:
-        try:
-            session.send("stop")
-        except Exception:
-            pass
-        try:
-            session.send("quit")
-        except Exception:
-            pass
-        try:
-            if session.process.poll() is None:
-                session.process.terminate()
-                session.process.wait(timeout=2)
-        except Exception:
-            try:
-                session.process.kill()
-            except Exception:
-                pass
-
-    lines = []
-    for mpv_idx in sorted(latest_by_multipv.keys()):
-        entry = latest_by_multipv[mpv_idx]
-        uci_pv = entry.get("pv", "")
-        uci_moves = uci_pv.split()
-        best_move_uci = uci_moves[0] if uci_moves else None
-        best_move_san = _get_move_san(fen, best_move_uci) if best_move_uci else None
-        pv_san = _uci_pv_to_san(fen, uci_pv)
-        lines.append({
-            "best_move": best_move_uci,
-            "best_move_san": best_move_san,
-            "score_cp": entry.get("score_cp"),
-            "score_mate": entry.get("score_mate"),
-            "depth": entry.get("depth", depth),
-            "pv_san": pv_san,
-            "pv_uci": uci_pv,
-            "multipv": mpv_idx,
-        })
-    return lines
 
 
 def _run_multipv_analysis(fen: str, depth: int, time_limit: float, num_lines: int = 3) -> List[Dict]:
@@ -197,8 +92,24 @@ def _run_multipv_analysis(fen: str, depth: int, time_limit: float, num_lines: in
             return lines
 
     except NotImplementedError:
-        # Fallback: use a raw UCI session with MultiPV support
-        return _run_multipv_fallback_session(fen, depth, time_limit, num_lines, stockfish_path)
+        # Fallback: run single PV via UCI session, return as single line
+        from app.backend.services.analyzer_service import _analyze_with_stockfish_session
+        result = _analyze_with_stockfish_session(fen, depth, time_limit, stockfish_path)
+        if not result:
+            return []
+        best_san = _get_move_san(fen, result.get("best_move", ""))
+        pv_uci = result.get("pv", "")
+        pv_san = _convert_pv_uci_to_san(fen, pv_uci) if pv_uci else ""
+        return [{
+            "best_move": result.get("best_move"),
+            "best_move_san": best_san,
+            "score_cp": result.get("score_cp"),
+            "score_mate": result.get("score_mate"),
+            "depth": result.get("depth", depth),
+            "pv_san": pv_san,
+            "pv_uci": pv_uci,
+            "multipv": 1,
+        }]
 
 
 async def _analyze_position_multipv(fen: str, depth: int = 20, time_limit: float = 0.5) -> Dict:
@@ -251,13 +162,7 @@ def _analyze_position_after_move_sync(fen: str, move_san: str, depth: int, time_
                     return 30000 if ws.mate() > 0 else -30000
                 return ws.score()
     except NotImplementedError:
-        from app.backend.services.analyzer_service import _analyze_with_stockfish_session
-        result = _analyze_with_stockfish_session(board.fen(), min(depth, 14), min(time_limit, 0.25), stockfish_path)
-        if result:
-            mate = result.get("score_mate")
-            if mate is not None:
-                return 30000 if mate > 0 else -30000
-            return result.get("score_cp")
+        pass  # fallback not needed — partial credit will use default
     except Exception as e:
         logger.warning(f"Could not analyze after move {move_san}: {e}")
     return None
@@ -309,6 +214,46 @@ def _get_move_san(fen: str, uci_move: str) -> str:
     except Exception as e:
         logger.warning(f"Could not convert {uci_move} to SAN: {e}")
         return uci_move
+
+
+def _convert_pv_uci_to_san(fen: str, pv_uci_str: str) -> str:
+    """Convert space-separated UCI PV string to SAN format with move numbering.
+    Example: 'b7b5 c4b5 e3a1' -> '1...b5 2. c4 b5 3. e3 a1'"""
+    if not pv_uci_str or not pv_uci_str.strip():
+        return ""
+    try:
+        board = chess.Board(fen)
+        uci_moves = pv_uci_str.strip().split()
+        san_parts = []
+        move_num = board.fullmove_number
+        is_white = board.turn == chess.WHITE
+        move_count = 0
+
+        for uci in uci_moves[:8]:  # Limit to 8 moves for display
+            try:
+                move = chess.Move.from_uci(uci)
+                san = board.san(move)
+                move_count += 1
+
+                if is_white:
+                    san_parts.append(f"{move_num}. {san}")
+                else:
+                    if move_count == 1:
+                        san_parts.append(f"{move_num}...{san}")
+                    else:
+                        san_parts.append(san)
+
+                board.push(move)
+                is_white = board.turn == chess.WHITE
+                if is_white:
+                    move_num += 1
+            except Exception:
+                break
+
+        return " ".join(san_parts)
+    except Exception as e:
+        logger.warning(f"Could not convert PV to SAN: {e}")
+        return pv_uci_str
 
 
 async def evaluate_quiz_response(

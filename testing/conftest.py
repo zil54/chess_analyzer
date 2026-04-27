@@ -47,7 +47,10 @@ async def prepare_schema(db_conn):
                 result TEXT,
                 event TEXT,
                 site TEXT,
-                date TEXT
+                date TEXT,
+                pgn_source TEXT,
+                imported_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             );
             """
         )
@@ -64,6 +67,11 @@ async def prepare_schema(db_conn):
                 color CHAR(1) GENERATED ALWAYS AS (
                     CASE WHEN ply % 2 = 1 THEN 'W' ELSE 'B' END
                 ) STORED,
+                variation_parent_id BIGINT,
+                variation_index INT,
+                is_mainline BOOLEAN,
+                move_number INT,
+                fen_before TEXT,
                 UNIQUE (game_id, ply)
             );
             """
@@ -77,7 +85,26 @@ async def prepare_schema(db_conn):
                 score_mate INT,
                 depth INT,
                 pv TEXT,
-                created_at TIMESTAMP DEFAULT NOW()
+                created_at TIMESTAMP DEFAULT NOW(),
+                engine TEXT,
+                is_tablebase BOOLEAN,
+                game_id BIGINT
+            );
+            """
+        )
+        await cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS public.analysis_lines (
+                fen TEXT NOT NULL,
+                depth INT NOT NULL,
+                line_number INT NOT NULL,
+                best_move TEXT,
+                score_cp INT,
+                score_mate INT,
+                pv TEXT,
+                updated_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (fen, depth, line_number),
+                FOREIGN KEY (fen) REFERENCES public.evals(fen)
             );
             """
         )

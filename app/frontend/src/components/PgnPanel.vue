@@ -7,7 +7,7 @@
     </div>
 
     <div v-if="pgnData" class="notes-section">
-      <div v-if="currentTreeNode && currentTreeNode.san" class="notes-active">
+      <div v-if="currentTreeNode && (currentTreeNode.san || currentTreeNode.id === 0 || currentTreeNode.ply === 0)" class="notes-active">
         <div class="notes-header-row">
           <label>{{ moveLabel }} - Comment:</label>
           <div class="notes-actions">
@@ -106,7 +106,7 @@
       </div>
 
       <div v-else class="notes-empty">
-        <p>Select a move to edit its comment and annotations.</p>
+        <p>Select a move or the starting position to edit its comment and annotations.</p>
       </div>
     </div>
   </div>
@@ -165,7 +165,7 @@ export default {
   watch: {
     currentTreeNode: {
       handler(newNode) {
-        if (newNode && newNode.san) {
+        if (newNode && (newNode.san || newNode.id === 0 || newNode.ply === 0)) {
           this.commentText = newNode.comment || '';
           this.selectedNags = new Set(Array.isArray(newNode.nags) ? newNode.nags : []);
         } else {
@@ -180,15 +180,22 @@ export default {
   },
   computed: {
     moveLabel() {
-      if (!this.currentTreeNode?.san) return 'Move';
-      const moveNum = this.currentTreeNode.move_number || '';
-      const color = this.currentTreeNode.color;
-      const san = this.currentTreeNode.san;
-
-      if (color === 'w') {
-        return `${moveNum}. ${san}`;
+      if (!this.currentTreeNode) return 'Move';
+      // If root node (starting position)
+      if (this.currentTreeNode.id === 0 || this.currentTreeNode.ply === 0) {
+        return 'Starting Position';
       }
-      return `${moveNum}... ${san}`;
+      // If regular move
+      if (this.currentTreeNode.san) {
+        const moveNum = this.currentTreeNode.move_number || '';
+        const color = this.currentTreeNode.color;
+        const san = this.currentTreeNode.san;
+        if (color === 'w') {
+          return `${moveNum}. ${san}`;
+        }
+        return `${moveNum}... ${san}`;
+      }
+      return 'Move';
     }
   },
   methods: {

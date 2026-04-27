@@ -18,6 +18,9 @@ app/frontend/dist/
 # Large binaries
 
 
+# Development documentation (not staged)
+documentation-dev/
+
 # OS
 .DS_Store
 Thumbs.db
