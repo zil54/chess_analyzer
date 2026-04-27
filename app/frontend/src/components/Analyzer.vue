@@ -38,31 +38,32 @@
           :fen="fen"
           :flipped="boardFlipped"
           :boardTheme="selectedBoardTheme"
+          :allowFreeEdit="!pgnData"
           @user-move="onUserMove"
         />
 
-        <div class="board-controls" v-if="pgnData">
+        <div class="board-controls">
           <button @click="firstMove" :disabled="currentMove === 0">|&lt; First</button>
           <button @click="prevMove" :disabled="!canGoPrev">&lt; Prev</button>
           <button @click="nextMove" :disabled="!canGoNext">Next &gt;</button>
-          <button @click="lastMove" :disabled="currentMove === pgnData.total_moves">Last &gt;|</button>
+          <button @click="lastMove" :disabled="!pgnData || currentMove === pgnData.total_moves">Last &gt;|</button>
         </div>
       </div>
 
       <!-- RIGHT SECTION: Tabs -->
       <aside class="right-panel">
         <div class="tabs-header">
-          <button :class="{active: activeTab === 'PGN'}" @click="activeTab = 'PGN'" :disabled="isQuizActive || quizModeDisablesOtherTabs">
+          <button :class="{active: activeTab === 'PGN'}" @click="activeTab = 'PGN'" :disabled="quizModeDisablesOtherTabs">
             PGN<span v-if="hasUnsavedChanges"> *</span>
           </button>
           <button
             :class="{active: activeTab === 'Games'}"
             @click="activeTab = 'Games'"
-            :disabled="sessionGames.length === 0 || isQuizActive || quizModeDisablesOtherTabs"
+            :disabled="sessionGames.length === 0 || quizModeDisablesOtherTabs"
           >
             Games ({{sessionGames.length}})
           </button>
-          <button :class="{active: activeTab === 'Analysis'}" @click="activeTab = 'Analysis'" :disabled="isQuizActive || quizModeDisablesOtherTabs">Analysis</button>
+          <button :class="{active: activeTab === 'Analysis'}" @click="activeTab = 'Analysis'" :disabled="quizModeDisablesOtherTabs">Analysis</button>
           <button
             :class="{active: activeTab === 'Quiz'}"
             @click="activeTab = 'Quiz'"
@@ -74,7 +75,7 @@
 
         <div class="tab-content" v-show="activeTab === 'PGN'">
           <div v-if="!pgnData" class="empty-state">
-            <p>Upload a PGN file or choose a game to see its moves here.</p>
+            <p>Upload a PGN file, choose a game, or start moving on the board to create a new unsaved game.</p>
           </div>
           <template v-else>
             <PgnPanel
@@ -117,6 +118,7 @@
           <GameSelector
             :games="sessionGames"
             :initialGameId="gameId"
+            :displayedGameId="gameId"
             @select-game="loadGame"
           />
         </div>
@@ -135,12 +137,14 @@
              ref="quizTab"
              :positions="quizPositions"
              :gameId="gameId"
+              :startingFen="currentGameStartFen"
              :apiBaseUrl="getApiBaseUrl()"
              @start-quiz="handleStartQuiz"
              @stop-quiz="handleStopQuiz"
              @show-position="handleQuizShowPosition"
              @quiz-finished="handleQuizFinished"
              @quiz-mode-changed="handleQuizModeChanged"
+             @quiz-exit-first-move="handleQuizExitFirstMove"
              @flip-board="flipBoard"
            />
          </div>
@@ -201,6 +205,8 @@ function buildWebSocketUrl(path) {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
   return buildApiUrl(normalizedPath).replace(/^http/i, 'ws');
 }
+
+const STANDARD_START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 
 export default {
   name: 'Analyzer',
@@ -281,7 +287,7 @@ export default {
 
   computed: {
     canAnalyze() {
-      return this.fen && this.fen.trim().length > 0 && !this.isQuizActive;
+      return this.fen && this.fen.trim().length > 0 && !this.isQuizActive && !this.quizModeDisablesOtherTabs;
     },
     sessionGames() {
       return this.games.filter(g => this.sessionGameIds.includes(g.id));
@@ -345,7 +351,7 @@ export default {
       return map;
     },
     canGoPrev() {
-      if (this.isQuizActive) return false;
+      if (this.isQuizActive || this.quizModeDisablesOtherTabs) return false;
       if (!this.pgnData) return false;
       if (this.pgnData?.variation_tree) {
         return this.currentTreeNodeId !== 0 && Number.isInteger(this.treeParentMap[this.currentTreeNodeId]);
@@ -353,7 +359,7 @@ export default {
       return this.currentMove > 0;
     },
     canGoNext() {
-      if (this.isQuizActive) return false;
+      if (this.isQuizActive || this.quizModeDisablesOtherTabs) return false;
       if (!this.pgnData) return false;
       if (this.pgnData?.variation_tree) {
         return Boolean(this.getContinuationChild(this.currentTreeNode));
@@ -362,6 +368,9 @@ export default {
     },
     selectedBoardTheme() {
       return this.boardThemes.find((theme) => theme.id === this.selectedBoardThemeId) || this.boardThemes[0];
+    },
+    currentGameStartFen() {
+      return this.pgnData?.positions?.[0]?.fen || STANDARD_START_FEN;
     }
   },
 
@@ -369,6 +378,186 @@ export default {
     // Expose the API base URL so child components (QuizTab) can make direct backend calls
     getApiBaseUrl() {
       return getApiBaseUrl();
+    },
+
+    getTodayPgnDate() {
+      const now = new Date();
+      const yyyy = now.getFullYear();
+      const mm = String(now.getMonth() + 1).padStart(2, '0');
+      const dd = String(now.getDate()).padStart(2, '0');
+      return `${yyyy}.${mm}.${dd}`;
+    },
+
+    createScratchGameFromFen(startFen) {
+      const rootFen = typeof startFen === 'string' && startFen.trim() ? startFen.trim() : STANDARD_START_FEN;
+      this.gameId = null;
+      this.pgnData = {
+        headers: {
+          event: 'New Analysis Game',
+          site: 'Local Analysis Board',
+          date: this.getTodayPgnDate(),
+          round: '-',
+          white: 'Analysis White',
+          black: 'Analysis Black',
+          result: '*',
+        },
+        total_moves: 0,
+        positions: [{ ply: 0, fen: rootFen, comment: null, cp_tag: false }],
+        movetext: '*',
+        variation_tree: {
+          id: 0,
+          ply: 0,
+          move_number: 0,
+          color: null,
+          move: null,
+          san: null,
+          fen: rootFen,
+          comment: null,
+          starting_comment: null,
+          nags: [],
+          nag_symbols: [],
+          nag_display: null,
+          is_mainline: true,
+          mainline_index: 0,
+          anchor_mainline_index: 0,
+          variations: [],
+        },
+        mainline_node_ids: [0],
+        isScratchGame: true,
+      };
+      this.currentMove = 0;
+      this.currentTreeNodeId = 0;
+      this.refreshQuizPositions();
+    },
+
+    getMainlineChild(node) {
+      const variations = Array.isArray(node?.variations) ? node.variations : [];
+      return variations.find((variation) => variation?.is_mainline) || null;
+    },
+
+    serializePgnComment(comment) {
+      if (!comment) return '';
+      const normalized = String(comment).replace(/[{}]/g, '').trim();
+      return normalized ? `{${normalized}}` : '';
+    },
+
+    serializePgnNags(nags) {
+      if (!Array.isArray(nags) || !nags.length) return '';
+      return nags
+        .filter((nag) => Number.isInteger(nag) || /^\d+$/.test(String(nag)))
+        .map((nag) => `$${Number(nag)}`)
+        .join(' ');
+    },
+
+    serializeMovePrefix(node) {
+      if (!node) return '';
+      return node.color === 'w' ? `${node.move_number}.` : `${node.move_number}...`;
+    },
+
+    serializeVariationBranch(node) {
+      if (!node) return '';
+
+      const parts = [this.serializeMovePrefix(node), node.san].filter(Boolean);
+      const nags = this.serializePgnNags(node.nags);
+      if (nags) parts.push(nags);
+      const comment = this.serializePgnComment(node.comment);
+      if (comment) parts.push(comment);
+
+      const children = Array.isArray(node.variations) ? node.variations : [];
+      const mainlineChild = children.find((child) => child?.is_mainline) || children[0] || null;
+      const sideLines = children.filter((child) => child && child !== mainlineChild);
+      for (const sideLine of sideLines) {
+        const branchText = this.serializeVariationBranch(sideLine);
+        if (branchText) parts.push(`(${branchText})`);
+      }
+      if (mainlineChild) {
+        const continuation = this.serializeVariationBranch(mainlineChild);
+        if (continuation) parts.push(continuation);
+      }
+
+      return parts.join(' ').trim();
+    },
+
+    rebuildScratchGameData() {
+      if (!this.pgnData?.isScratchGame || !this.pgnData?.variation_tree) return;
+
+      const positions = [{
+        ply: 0,
+        fen: this.pgnData.variation_tree.fen,
+        comment: this.pgnData.variation_tree.comment || null,
+        cp_tag: Boolean(this.pgnData.variation_tree.cp_tag),
+      }];
+      const mainlineNodeIds = [0];
+      let node = this.pgnData.variation_tree;
+      while (true) {
+        const child = this.getMainlineChild(node);
+        if (!child) break;
+        mainlineNodeIds.push(child.id);
+        positions.push({
+          ply: child.ply,
+          san: child.san,
+          fen: child.fen,
+          color: child.color,
+          move_number: child.move_number,
+          comment: child.comment || null,
+          cp_tag: Boolean(child.cp_tag),
+        });
+        node = child;
+      }
+
+      this.pgnData.positions = positions;
+      this.pgnData.total_moves = Math.max(0, positions.length - 1);
+      this.pgnData.mainline_node_ids = mainlineNodeIds;
+
+      const movetextParts = [];
+      const rootComment = this.serializePgnComment(this.pgnData.variation_tree.comment);
+      if (rootComment) movetextParts.push(rootComment);
+
+      const rootChildren = Array.isArray(this.pgnData.variation_tree.variations) ? this.pgnData.variation_tree.variations : [];
+      const mainlineChild = rootChildren.find((child) => child?.is_mainline) || rootChildren[0] || null;
+      const sideLines = rootChildren.filter((child) => child && child !== mainlineChild);
+      for (const sideLine of sideLines) {
+        const branchText = this.serializeVariationBranch(sideLine);
+        if (branchText) movetextParts.push(`(${branchText})`);
+      }
+      if (mainlineChild) {
+        const mainlineText = this.serializeVariationBranch(mainlineChild);
+        if (mainlineText) movetextParts.push(mainlineText);
+      }
+
+      const resultToken = this.pgnData.headers?.result || '*';
+      this.pgnData.movetext = [movetextParts.join(' ').trim(), resultToken].filter(Boolean).join(' ').trim();
+      this.refreshQuizPositions();
+    },
+
+    buildScratchGamePgn() {
+      if (!this.pgnData?.variation_tree) return '';
+      if (this.pgnData?.isScratchGame) {
+        this.rebuildScratchGameData();
+      }
+
+      const headers = this.pgnData.headers || {};
+      const orderedHeaders = [
+        ['Event', headers.event || 'New Analysis Game'],
+        ['Site', headers.site || 'Local Analysis Board'],
+        ['Date', headers.date || this.getTodayPgnDate()],
+        ['Round', headers.round || '-'],
+        ['White', headers.white || 'Analysis White'],
+        ['Black', headers.black || 'Analysis Black'],
+        ['Result', headers.result || '*'],
+      ];
+      const setupHeaders = [];
+      const startFen = this.pgnData.positions?.[0]?.fen || STANDARD_START_FEN;
+      if (startFen !== STANDARD_START_FEN) {
+        setupHeaders.push(['SetUp', '1']);
+        setupHeaders.push(['FEN', startFen]);
+      }
+
+      const headerText = [...orderedHeaders, ...setupHeaders]
+        .map(([key, value]) => `[${key} "${String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"]`)
+        .join('\n');
+
+      return `${headerText}\n\n${this.pgnData.movetext || (headers.result || '*')}\n`;
     },
 
     toggleBoardSettings() {
@@ -449,6 +638,10 @@ export default {
 
           await this.$nextTick();
           this.refreshQuizPositions();
+          await this.$nextTick();
+          if (this.$refs.quizTab?.markPGNSaved) {
+            this.$refs.quizTab.markPGNSaved();
+          }
 
           this.fetchQuizData(gameId);
 
@@ -468,6 +661,10 @@ export default {
       const localQuizPositions = this.buildQuizPositionsFromCurrentGame();
       this.quizPositions = localQuizPositions;
       if (!gameId) {
+        await this.$nextTick();
+        if (this.$refs.quizTab?.markPGNSaved) {
+          this.$refs.quizTab.markPGNSaved();
+        }
         return;
       }
 
@@ -479,6 +676,11 @@ export default {
         }
       } catch (err) {
         console.error("Failed to fetch quiz data:", err);
+      } finally {
+        await this.$nextTick();
+        if (this.$refs.quizTab?.markPGNSaved) {
+          this.$refs.quizTab.markPGNSaved();
+        }
       }
     },
 
@@ -632,14 +834,34 @@ export default {
       this.quizModeDisablesOtherTabs = event.active;
       if (event.active) {
         this.activeTab = 'Quiz'; // Force tab to stay on Quiz
-      } else {
+      } else if (event?.reason === 'exit') {
         // When exiting quiz, reset to the starting position of the PGN
         this.currentMove = 0;
-        if (this.pgnData && this.pgnData.positions && this.pgnData.positions[0]) {
-          this.fen = this.pgnData.positions[0].fen;
-        }
+        this.fen = this.currentGameStartFen;
       }
     },
+
+    handleQuizExitFirstMove(event) {
+      // Called when exiting quiz mode to return to first move with quiz orientation
+      // event.keepFlipped: whether to keep the board flipped (was flipped for Black quiz)
+      // event.startingFen: the starting FEN
+
+      // Go to the first move of the game
+      this.currentMove = 0;
+      this.fen = event.startingFen || this.currentGameStartFen;
+
+      // Apply the orientation from the quiz (keepFlipped = true if Black quiz)
+      // The board should remain in whichever orientation the quiz used
+      if (event.keepFlipped && !this.boardFlipped) {
+        this.flipBoard();
+      } else if (!event.keepFlipped && this.boardFlipped) {
+        this.flipBoard();
+      }
+
+      // Reset board state
+      this.resetAnalysisState();
+    },
+
     getContinuationChild(node) {
       const variations = Array.isArray(node?.variations) ? node.variations : [];
       return variations.find((variation) => variation?.is_mainline) || variations[0] || null;
@@ -830,11 +1052,8 @@ export default {
         return;
       }
 
-      // During analysis (not quiz), allow moves and update analysis
       if (!this.pgnData || !this.pgnData.variation_tree) {
-        this.fen = moveInfo.fen;
-        if (this.socket) this.analyzeLive();
-        return;
+        this.createScratchGameFromFen(this.fen);
       }
 
       // If PGN with variations is loaded, handle move with variation tree
@@ -893,6 +1112,13 @@ export default {
        const newColor = parentTurn;
        const newMoveNumber = parentFullmove;
 
+       const existingMainlineChild = Array.isArray(parentNode.variations)
+         ? parentNode.variations.find((variation) => variation?.is_mainline)
+         : null;
+       const extendsScratchMainline = Boolean(this.pgnData?.isScratchGame)
+         && parentNode?.is_mainline !== false
+         && !existingMainlineChild;
+
        const newId = this.generateNewNodeId();
        const newNode = {
          id: newId,
@@ -907,9 +1133,9 @@ export default {
          nags: [],
          nag_symbols: [],
          nag_display: null,
-         is_mainline: false,
-         mainline_index: null,
-         anchor_mainline_index: parentMainlineIndex,
+         is_mainline: extendsScratchMainline,
+         mainline_index: extendsScratchMainline ? parentMainlineIndex + 1 : null,
+         anchor_mainline_index: extendsScratchMainline ? parentMainlineIndex + 1 : parentMainlineIndex,
          variations: []
        };
 
@@ -925,6 +1151,10 @@ export default {
 
        // Force Vue to recognize deep reactivity by replacing array
        parentNode.variations = [...parentNode.variations];
+
+       if (this.pgnData?.isScratchGame) {
+         this.rebuildScratchGameData();
+       }
 
        await this.selectTreeNode(newId);
       } catch (err) {
@@ -952,6 +1182,9 @@ export default {
         if (!this.unsavedNodeIds.includes(nodeId)) {
           this.unsavedNodeIds.push(nodeId);
         }
+        if (this.pgnData?.isScratchGame) {
+          this.rebuildScratchGameData();
+        }
       }
     },
 
@@ -966,6 +1199,9 @@ export default {
         this.hasUnsavedChanges = true;
         if (!this.unsavedNodeIds.includes(nodeId)) {
           this.unsavedNodeIds.push(nodeId);
+        }
+        if (this.pgnData?.isScratchGame) {
+          this.rebuildScratchGameData();
         }
         this.refreshQuizPositions();
       }
@@ -985,11 +1221,53 @@ export default {
     },
 
     async saveChanges() {
+      if (!this.gameId && this.pgnData?.isScratchGame) {
+        const scratchPgn = this.buildScratchGamePgn();
+        if (!scratchPgn.trim()) {
+          alert('Nothing to save yet.');
+          return;
+        }
+
+        try {
+          const response = await fetch(buildApiUrl('/games'), {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ pgn: scratchPgn }),
+          });
+
+          if (!response.ok) {
+            const detail = await this.readErrorResponse(response, 'Failed to save new game');
+            throw new Error(detail);
+          }
+
+          const data = await response.json();
+          if (!data.success || !data.id) {
+            throw new Error('Failed to create new saved game');
+          }
+
+          if (!this.sessionGameIds.includes(data.id)) {
+            this.sessionGameIds = [...this.sessionGameIds, data.id];
+          }
+          await this.fetchGames();
+          await this.loadGame(data.id);
+
+          this.hasUnsavedChanges = false;
+          this.unsavedNodeIds = [];
+          this.backupTreeNodeId = null;
+          return;
+        } catch (error) {
+          console.error('Failed to save new scratch game:', error);
+          alert(`Save failed: ${this.stringifyError(error, 'Unknown error')}`);
+          return;
+        }
+      }
+
       if (this.gameId && this.pgnData?.variation_tree && Array.isArray(this.pgnData.mainline_node_ids)) {
         const annotations = this.pgnData.mainline_node_ids
-          .slice(1)
           .map((nodeId, index) => {
-            const ply = index + 1;
+            const ply = index;
             const node = this.treeNodeMap[nodeId];
             if (!node) return null;
             return {
@@ -1302,7 +1580,7 @@ export default {
     },
 
     async nextMove() {
-      if (!this.pgnData) return;
+      if (!this.pgnData && !this.fen) return;
 
       if (this.pgnData?.variation_tree) {
         const nextNode = this.getContinuationChild(this.currentTreeNode);
@@ -1312,14 +1590,14 @@ export default {
         return;
       }
 
-      if (this.currentMove < this.pgnData.total_moves) {
+      if (this.pgnData && this.currentMove < this.pgnData.total_moves) {
         this.currentMove++;
         await this.showPosition(this.currentMove);
       }
     },
 
     async prevMove() {
-      if (!this.pgnData) return;
+      if (!this.pgnData && !this.fen) return;
 
       if (this.pgnData?.variation_tree) {
         const parentNodeId = this.treeParentMap[this.currentTreeNodeId];
@@ -1329,7 +1607,7 @@ export default {
         return;
       }
 
-      if (this.currentMove > 0) {
+      if (this.pgnData && this.currentMove > 0) {
         this.currentMove--;
         await this.showPosition(this.currentMove);
       }

@@ -60,7 +60,7 @@
           <button v-if="currentIdx < _quizPositions.length - 1" class="btn-next" @click="nextPosition">
             Next Position &rarr;
           </button>
-          <button v-else class="btn-finish" @click="finishQuiz">Finish &amp; Analyze</button>
+          <button v-else class="btn-finish" @click="finishQuiz">Finish</button>
         </div>
       </template>
     </div>
@@ -176,11 +176,8 @@
       </div>
 
       <div class="results-actions">
-        <button @click="saveQuizResults" :disabled="isSaving" class="btn-save">
+        <button @click="saveQuizResults(true)" :disabled="isSaving" class="btn-save">
           {{ isSaving ? '💾 Saving...' : '💾 Save Results' }}
-        </button>
-        <button @click="exportToPDF" class="btn-export" title="Export results to PDF">
-          📄 Export to PDF
         </button>
         <button @click="redoQuiz" class="btn-redo">🔄 Redo Same Quiz</button>
         <button @click="exitQuizMode" class="btn-exit">✕ Exit Quiz Mode</button>
@@ -263,6 +260,7 @@ export default {
   props: {
     positions:   { type: Array,  required: true },
     gameId:      { type: Number, required: false, default: null },
+    startingFen: { type: String, required: false, default: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1' },
     apiBaseUrl:  { type: String, required: false, default: '' },
   },
    emits: ['start-quiz', 'stop-quiz', 'show-position', 'quiz-finished', 'correct-move', 'jump-to-ply', 'quiz-mode-changed', 'flip-board'],
@@ -295,6 +293,8 @@ export default {
       // background analysis cache
       analysisCache: {},   // keyed by ply, stores backend analysis results
       analyzedPlies: new Set(),  // track which plies have been analyzed
+      // board flip state tracking - track if we flipped the board for Black
+      boardWasFlipped: false,
     };
   },
 
@@ -321,55 +321,140 @@ export default {
 
   watch: {
     positions(newPositions, oldPositions) {
-      // When positions change (new PGN uploaded), reset quiz results
-      if (JSON.stringify(newPositions) !== JSON.stringify(oldPositions)) {
-        this.quizResults = null;
+      // NEVER touch quiz state while a quiz is active or results are displayed.
+      // Only reset state on idle setup screen when the underlying position set changes.
+      if (this.isQuizStarted || this.quizResults || this.isLoadingResults) return;
+
+      if (this.quizPositionsSignature(newPositions) !== this.quizPositionsSignature(oldPositions)) {
         this.isQuizStarted = false;
         this.positionResults = {};
         this.currentIdx = 0;
         this.isRevealed = false;
         this.submittedMoveSan = null;
         this._quizPositions = [];
+        this.analysisCache = {};
+        this.analyzedPlies = new Set();
+        this.$emit('quiz-mode-changed', { active: false, reason: 'positions-sync' });
       }
     },
-    gameId(newGameId) {
-      // When game changes, mark that we need to save before starting new quiz
-      if (newGameId !== this.lastSavedGameId) {
-        this.quizResults = null;
-        this.isQuizStarted = false;
+    async gameId(newGameId, oldGameId) {
+      if (newGameId === oldGameId) return;
+
+      // If a quiz is running or results are on screen, do NOT touch quiz state.
+      // The user must explicitly exit before switching games matters to the quiz.
+      if (this.isQuizStarted || this.quizResults || this.isLoadingResults) return;
+
+      this.analysisCache = {};
+      this.analyzedPlies = new Set();
+      this.$emit('quiz-mode-changed', { active: false, reason: 'game-changed' });
+
+      // Only load saved results when there's no active quiz session
+      await this.loadSavedQuizResults();
+    },
+    quizResults(newResults) {
+      if (newResults) {
+        this.$emit('quiz-mode-changed', { active: true });
       }
     },
   },
 
    methods: {
-     // ── Lifecycle ──────────────────────────────────────────────────────────
-     startQuiz() {
-      this._quizPositions   = [...this.filteredPositions];
-      this.isQuizStarted    = true;
-      this.currentIdx       = 0;
-      this.isRevealed       = false;
-      this.submittedMoveSan = null;
-      this.positionResults  = {};
-      this.quizResults      = null;
-      // Flip board to match the selected color (Black flips the board)
-      if (this.selectedColor === 'B') {
-        this.$emit('flip-board');
-      }
-      this.$emit('start-quiz');
-      this.$emit('quiz-mode-changed', { active: true });
-      this.setupPosition();
-     },
+       quizPositionsSignature(positions) {
+        return JSON.stringify(
+          (Array.isArray(positions) ? positions : []).map((position) => ({
+            ply: position?.ply ?? null,
+            fen_before: position?.fen_before ?? null,
+            expected_move_san: position?.expected_move_san ?? null,
+            color: position?.color ?? null,
+          }))
+        );
+      },
 
-     stopQuiz() {
-      this.isQuizStarted = false;
-      this.clearTimer();
-      // Reset board orientation when stopping quiz
-      if (this.selectedColor === 'B') {
-        this.$emit('flip-board');
-      }
-      this.$emit('stop-quiz');
-      this.$emit('quiz-mode-changed', { active: false });
-     },
+       normalizeQuizEntry(entry) {
+        const base = entry && typeof entry === 'object' ? entry : {};
+        const analysis = base.analysis && typeof base.analysis === 'object' ? base.analysis : null;
+        const stockfish = analysis?.stockfish || base.stockfish || null;
+        const evalSwing = analysis?.eval_swing_cp ?? base.eval_swing_cp ?? null;
+        const pass = typeof base.pass === 'boolean'
+          ? base.pass
+          : ((analysis?.result_type || base.result_type || 'fail') !== 'fail');
+        const credit = analysis?.credit ?? base.credit ?? (pass ? 1 : 0);
+        const normalizedAnalysis = (analysis || base.feedback || stockfish || evalSwing !== null)
+          ? {
+              feedback: analysis?.feedback ?? base.feedback ?? null,
+              credit,
+              result_type: analysis?.result_type ?? base.result_type ?? (pass ? 'full' : 'fail'),
+              eval_swing_cp: evalSwing,
+              expected_move_san: analysis?.expected_move_san ?? base.expected_move_san ?? base.game_move_san ?? null,
+              game_move_san: analysis?.game_move_san ?? base.game_move_san ?? null,
+              game_differs_from_sf: analysis?.game_differs_from_sf ?? base.game_differs_from_sf ?? false,
+              stockfish: stockfish || {},
+            }
+          : null;
+
+        return {
+          ...base,
+          fen_before: base.fen_before || base.position_fen || null,
+          expected_move_san: base.expected_move_san || base.game_move_san || null,
+          result_type: normalizedAnalysis?.result_type ?? base.result_type ?? (pass ? 'full' : 'fail'),
+          credit,
+          pass,
+          analysis: normalizedAnalysis,
+        };
+      },
+
+      setQuizResults(rawResults) {
+        const results = rawResults && typeof rawResults === 'object' ? rawResults : {};
+        const entries = Array.isArray(results.entries) ? results.entries.map((entry) => this.normalizeQuizEntry(entry)) : [];
+        const passAnswers = entries.filter((entry) => entry.pass).length;
+        this.quizResults = {
+          score_percentage: results.score_percentage ?? 0,
+          pass_answers: results.pass_answers ?? passAnswers,
+          full_answers: results.full_answers ?? entries.filter((entry) => entry.result_type === 'full').length,
+          partial_answers: results.partial_answers ?? entries.filter((entry) => entry.result_type === 'partial').length,
+          fail_answers: results.fail_answers ?? entries.filter((entry) => entry.attempted && !entry.pass).length,
+          skipped_answers: results.skipped_answers ?? entries.filter((entry) => !entry.attempted).length,
+          total_questions: results.total_questions ?? entries.length,
+          total_credit: results.total_credit ?? entries.reduce((sum, entry) => sum + (entry.credit || 0), 0),
+          entries,
+          error: results.error ?? null,
+        };
+      },
+
+      // ── Lifecycle ──────────────────────────────────────────────────────────
+      startQuiz() {
+       this._quizPositions   = [...this.filteredPositions];
+       this.isQuizStarted    = true;
+       this.currentIdx       = 0;
+       this.isRevealed       = false;
+       this.submittedMoveSan = null;
+       this.positionResults  = {};
+       this.quizResults      = null;
+       this.analysisCache    = {};
+       this.analyzedPlies    = new Set();
+       this.$emit('start-quiz');
+       this.$emit('quiz-mode-changed', { active: true });
+       // Flip board to match the selected color (Black flips the board)
+       if (this.selectedColor === 'B') {
+         this.boardWasFlipped = true;
+         this.$emit('flip-board');
+       } else {
+         this.boardWasFlipped = false;
+       }
+       this.setupPosition();
+      },
+
+      stopQuiz() {
+       this.isQuizStarted = false;
+       this.clearTimer();
+       // Reset board orientation if it was flipped for Black
+       if (this.boardWasFlipped) {
+         this.boardWasFlipped = false;
+         this.$emit('flip-board');
+       }
+       this.$emit('stop-quiz');
+       this.$emit('quiz-mode-changed', { active: false, reason: 'stop' });
+      },
 
     setupPosition() {
       if (!this.currentPosition) return;
@@ -488,31 +573,41 @@ export default {
           user_move: e.user_move_uci,
         }));
 
-      this.isLoadingResults = true;
-      let backendResultsMap = {};
+       this.isLoadingResults = true;
+       let backendResultsMap = {};
 
-      try {
-        if (this.gameId && backendPayload.length > 0) {
-          const url = `${this.apiBaseUrl}/games/${this.gameId}/quiz/results`;
-          const resp = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ responses: backendPayload, depth: 20, time_limit: 0.6 }),
-          });
-          if (resp.ok) {
-            const data = await resp.json();
-            for (const r of (data.results || [])) {
-              backendResultsMap[r.ply] = r;
-            }
-          } else {
-            console.warn('Quiz analysis HTTP error', resp.status);
-          }
-        }
-      } catch (err) {
-        console.error('Quiz analysis fetch failed:', err);
-      } finally {
-        this.isLoadingResults = false;
-      }
+       try {
+         if (backendPayload.length > 0) {
+           // Use gameId endpoint if available, else use freeform endpoint
+           const url = this.gameId
+             ? `${this.apiBaseUrl}/games/${this.gameId}/quiz/results`
+             : `${this.apiBaseUrl}/quiz/results`;
+           const resp = await fetch(url, {
+             method: 'POST',
+             headers: { 'Content-Type': 'application/json' },
+             body: JSON.stringify({ responses: backendPayload, depth: 20, time_limit: 0.6 }),
+           });
+           if (resp.ok) {
+             const data = await resp.json();
+             for (const r of (data.results || [])) {
+               backendResultsMap[r.ply] = r;
+             }
+           } else {
+             console.warn('Quiz analysis HTTP error', resp.status);
+           }
+         }
+         // Also merge in cached background analysis that has completed
+         for (const [ply, cachedResult] of Object.entries(this.analysisCache)) {
+           if (!backendResultsMap[ply]) {
+             backendResultsMap[ply] = cachedResult;
+           }
+         }
+       } catch (err) {
+         console.error('Quiz analysis fetch failed:', err);
+       }
+      // NOTE: isLoadingResults is intentionally NOT cleared here (still true).
+      // It will be cleared atomically after setQuizResults() below so Vue
+      // renders loading→results in one tick, never briefly showing setup screen.
 
       // Merge backend results into entries
       const mergedEntries = allEntries.map(e => {
@@ -544,20 +639,28 @@ export default {
       const failCount    = mergedEntries.filter(e => e.attempted && !e.pass).length;
       const totalCredit  = mergedEntries.reduce((s, e) => s + (e.credit || 0), 0);
 
-      this.quizResults = {
-        score_percentage: attemptedCnt > 0 ? Math.round((totalCredit / attemptedCnt) * 100) : 0,
-        pass_answers:    passCount,
-        full_answers:    fullCount,
-        partial_answers: partialCount,
-        fail_answers:    failCount,
-        skipped_answers: mergedEntries.length - attemptedCnt,
-        total_questions: mergedEntries.length,
-        total_credit:    Math.round(totalCredit * 100) / 100,
-        entries: mergedEntries,
-        error: (backendPayload.length === 0)
-          ? 'No moves played – engine analysis unavailable.'
-          : (!this.gameId ? 'No game ID – engine analysis unavailable.' : null),
-      };
+       this.setQuizResults({
+         score_percentage: attemptedCnt > 0 ? Math.round((totalCredit / attemptedCnt) * 100) : 0,
+         pass_answers: passCount,
+         full_answers: fullCount,
+         partial_answers: partialCount,
+         fail_answers: failCount,
+         skipped_answers: mergedEntries.length - attemptedCnt,
+         total_questions: mergedEntries.length,
+         total_credit: Math.round(totalCredit * 100) / 100,
+         entries: mergedEntries,
+         error: (backendPayload.length === 0)
+           ? 'No moves played – engine analysis unavailable.'
+           : null,
+       });
+      // Clear loading flag atomically with results being set — Vue batches both
+      // into a single render cycle so the setup screen never flashes in between.
+      this.isLoadingResults = false;
+
+      // Auto-save quiz results to database
+      if (this.gameId) {
+        this.saveQuizResults(false);  // false = don't show alerts for auto-save
+      }
 
       // Keep tabs disabled throughout results screen (active: true maintains disabled state)
       this.$emit('quiz-mode-changed', { active: true });
@@ -616,34 +719,29 @@ export default {
       return '−+';
     },
 
-     redoQuiz() {
-       this.positionResults  = {};
-       this.quizResults      = null;
-       this.currentIdx       = 0;
-       this.isRevealed       = false;
-       this.submittedMoveSan = null;
-       this._quizPositions   = [...this.filteredPositions];
-       this.isQuizStarted    = true;
-       // Flip board to match the selected color (Black flips the board)
-       if (this.selectedColor === 'B') {
-         this.$emit('flip-board');
-       }
-       this.$emit('start-quiz');
-       this.setupPosition();
-     },
+      redoQuiz() {
+        this.positionResults  = {};
+        this.quizResults      = null;
+        this.currentIdx       = 0;
+        this.isRevealed       = false;
+        this.submittedMoveSan = null;
+        this._quizPositions   = [...this.filteredPositions];
+        this.isQuizStarted    = true;
+        this.analysisCache    = {};
+        this.analyzedPlies    = new Set();
+        this.$emit('quiz-mode-changed', { active: true });
+        // Flip board to match the selected color (Black flips the board)
+        if (this.selectedColor === 'B') {
+          this.boardWasFlipped = true;
+          this.$emit('flip-board');
+        } else {
+          this.boardWasFlipped = false;
+        }
+        this.$emit('start-quiz');
+        this.setupPosition();
+      },
 
-    resetQuiz() {
-      this.positionResults  = {};
-      this.quizResults      = null;
-      this.currentIdx       = 0;
-      this.isQuizStarted    = false;
-      this.isRevealed       = false;
-      this.submittedMoveSan = null;
-      this._quizPositions   = [];
-    },
-
-     exitQuizMode() {
-       // Clear all quiz state and return to normal
+     resetQuiz() {
        this.positionResults  = {};
        this.quizResults      = null;
        this.currentIdx       = 0;
@@ -651,20 +749,39 @@ export default {
        this.isRevealed       = false;
        this.submittedMoveSan = null;
        this._quizPositions   = [];
-       // Reset board orientation if it was flipped for Black
-       if (this.selectedColor === 'B') {
-         this.$emit('flip-board');
-       }
-       // Emit that we're exiting quiz mode (other tabs should be enabled)
-       this.$emit('quiz-mode-changed', { active: false });
-       // Reset board to starting position but keep PGN view at current move
-       this.$emit('show-position', 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1');
+       this.analysisCache    = {};
+       this.analyzedPlies    = new Set();
+       // Don't flip board in reset - just clear state
+       this.boardWasFlipped = false;
      },
 
-    exportToPDF() {
-      // TODO: Implement PDF export
-      alert('📄 PDF export feature coming soon!');
-    },
+      exitQuizMode() {
+         // Clear all quiz state and return to normal
+         this.positionResults  = {};
+         this.quizResults      = null;
+         this.currentIdx       = 0;
+         this.isQuizStarted    = false;
+         this.isRevealed       = false;
+         this.submittedMoveSan = null;
+         this._quizPositions   = [];
+         this.analysisCache    = {};
+         this.analyzedPlies    = new Set();
+
+         // Preserve the quiz's board orientation (keep it flipped if it was)
+         const quizFlipped = this.boardWasFlipped;
+
+         // Emit that we're exiting quiz mode (other tabs should be enabled)
+         this.$emit('quiz-mode-changed', { active: false, reason: 'exit' });
+
+         // Return to first move of current game, keeping quiz orientation
+         this.$emit('quiz-exit-first-move', {
+           keepFlipped: quizFlipped,
+           startingFen: this.startingFen
+         });
+
+         // Reset boardWasFlipped tracking
+         this.boardWasFlipped = false;
+       },
 
     markPGNSaved() {
       // Call this from parent when PGN save is complete
@@ -674,37 +791,41 @@ export default {
 
     setQuizResponses() {},  // compat stub
 
-    // ── Persistence methods ──
-    async loadSavedQuizResults() {
-      if (!this.gameId) return;
-      try {
-        const url = `${this.apiBaseUrl}/games/${this.gameId}/quiz/results`;
-        const resp = await fetch(url);
-        if (resp.ok) {
-          const data = await resp.json();
-          if (data.results && data.results.entries && data.results.entries.length > 0) {
-            this.quizResults = {
-              score_percentage: data.results.score_percentage,
-              pass_answers: 0,
-              full_answers: data.results.full_answers,
-              partial_answers: data.results.partial_answers,
-              fail_answers: data.results.fail_answers,
-              skipped_answers: data.results.skipped_answers,
-              total_questions: data.results.total_questions,
-              total_credit: data.results.total_credit,
-              entries: data.results.entries,
-              error: null,
-            };
-          }
-        }
-      } catch (err) {
-        console.warn('Could not load saved quiz results:', err);
-      }
-    },
+     // ── Persistence methods ──
+      async loadSavedQuizResults() {
+       if (!this.gameId) return;
+       // Never overwrite results that are already showing or a quiz in progress
+       if (this.quizResults || this.isQuizStarted || this.isLoadingResults) return;
+       try {
+         const url = `${this.apiBaseUrl}/games/${this.gameId}/quiz/results`;
+         const resp = await fetch(url);
+         if (resp.ok) {
+           const data = await resp.json();
+           // Handle both response structures
+           const resultsData = data.data || data.results || data;
+           if (resultsData && typeof resultsData === 'object') {
+             // Check if there are entries to display
+             const entries = resultsData.entries || resultsData.results;
+             if (Array.isArray(entries) && entries.length > 0) {
+               this.setQuizResults({
+                 ...resultsData,
+                 entries: entries,
+                 error: null
+               });
+               this.$emit('quiz-mode-changed', { active: true });
+             }
+           }
+         }
+       } catch (err) {
+         console.warn('Could not load saved quiz results:', err);
+       }
+     },
 
-    async saveQuizResults() {
+    async saveQuizResults(manualSave = true) {
       if (!this.gameId || !this.quizResults) {
-        alert('Cannot save: no game ID or no quiz results');
+        if (manualSave) {
+          alert('Cannot save: no game ID or no quiz results');
+        }
         return;
       }
 
@@ -727,18 +848,23 @@ export default {
         });
 
         if (resp.ok) {
-          const data = await resp.json();
-          alert('✓ Quiz results saved successfully!');
-          // Optionally reload to ensure UI reflects saved state
-          if (data.results) {
-            this.quizResults.entries = data.results.entries || this.quizResults.entries;
+          if (manualSave) {
+            alert('✓ Quiz results saved successfully!');
           }
+          // Do NOT call setQuizResults() here — the PUT response returns
+          // DB-formatted data (with extra fields like id/created_at) that can
+          // corrupt the already-correct frontend state.
         } else {
-          alert('✗ Failed to save quiz results');
+          if (manualSave) {
+            alert('✗ Failed to save quiz results');
+          }
+          console.error('Failed to save quiz results:', resp.status);
         }
       } catch (err) {
+        if (manualSave) {
+          alert('✗ Error saving quiz results: ' + err.message);
+        }
         console.error('Error saving quiz results:', err);
-        alert('✗ Error saving quiz results: ' + err.message);
       } finally {
         this.isSaving = false;
       }
@@ -747,13 +873,15 @@ export default {
     // ── Background analysis (runs during quiz) ────
     async analyzePositionInBackground() {
       const pos = this.currentPosition;
-      if (!pos || this.analyzedPlies.has(pos.ply) || !this.gameId) return;
+      if (!pos || this.analyzedPlies.has(pos.ply)) return;
 
       // Mark as being analyzed to avoid duplicate requests
       this.analyzedPlies.add(pos.ply);
 
       try {
-        const url = `${this.apiBaseUrl}/games/${this.gameId}/quiz/results`;
+        const url = this.gameId
+          ? `${this.apiBaseUrl}/games/${this.gameId}/quiz/results`
+          : `${this.apiBaseUrl}/quiz/results`;
         const payload = {
           responses: [{
             ply: pos.ply,
@@ -784,7 +912,14 @@ export default {
 
   },
 
-  beforeUnmount() { this.clearTimer(); },
+  beforeUnmount() {
+    this.clearTimer();
+    // Ensure board is unflipped when component unmounts
+    if (this.boardWasFlipped) {
+      this.boardWasFlipped = false;
+      this.$emit('flip-board');
+    }
+  },
 };
 </script>
 
@@ -880,14 +1015,12 @@ export default {
 .sf-nag-badge  { flex-shrink: 0; font-weight: bold; min-width: 22px; font-size: 1em; color: #555; }
 .sf-pv         { color: #444; font-family: 'Courier New', monospace; font-size: 0.93em; word-break: break-word; }
 .results-actions { display: flex; gap: 10px; padding-top: 12px; border-top: 1px solid #e0e0e0; }
-.btn-save, .btn-redo, .btn-new, .btn-export, .btn-exit { flex: 1; padding: 10px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; font-size: 0.9em; }
+.btn-save, .btn-redo, .btn-new, .btn-exit { flex: 1; padding: 10px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; font-size: 0.9em; }
 .btn-save       { background: #1565c0; color: #fff; }
 .btn-save:hover { background: #1551b0; }
 .btn-save:disabled { background: #bdbdbd; cursor: not-allowed; }
 .btn-redo       { background: #1976d2; color: #fff; }
 .btn-redo:hover { background: #1565c0; }
-.btn-export     { background: #f57c00; color: #fff; }
-.btn-export:hover { background: #e65100; }
 .btn-exit       { background: #d32f2f; color: #fff; }
 .btn-exit:hover { background: #c62828; }
 .btn-new        { background: #757575; color: #fff; }

@@ -1195,3 +1195,45 @@ async def submit_quiz_results(game_id: int, request: Request):
     except Exception as e:
         logger.error(f"Error in quiz results endpoint: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Quiz evaluation failed: {str(e)}")
+
+@router.post("/quiz/results")
+async def analyze_quiz_responses(request: Request):
+    """
+    Evaluate quiz responses using Stockfish analysis.
+
+    This endpoint is for temporary/freeform quizzes without a saved game.
+    Same request/response format as /games/{game_id}/quiz/results
+    but works without a game_id.
+    """
+    try:
+        from app.backend.services.quiz_results_service import evaluate_quiz_response
+
+        # Parse request
+        data = await request.json()
+        responses = data.get("responses", [])
+        depth = int(data.get("depth", 20))
+        time_limit = float(data.get("time_limit", 0.5))
+
+        if not responses:
+            raise HTTPException(status_code=400, detail="responses list is required")
+
+        logger.info(f"Evaluating freeform quiz with {len(responses)} responses")
+
+        # Evaluate quiz responses (game_id=0 for freeform)
+        result = await evaluate_quiz_response(
+            game_id=0,
+            responses=responses,
+            depth=depth,
+            time_limit=time_limit
+        )
+
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error", "Quiz evaluation failed"))
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in freeform quiz results endpoint: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Quiz evaluation failed: {str(e)}")
