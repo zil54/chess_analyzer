@@ -8,12 +8,15 @@
         v-for="game in games"
         :key="game.id"
         class="game-item"
-        :class="{ active: selectedGameId === game.id }"
+        :class="{ active: activeGameId === game.id }"
         @click="selectGame(game.id)"
       >
         <div class="game-title">
           <strong>{{ game.white }} vs {{ game.black }}</strong>
-          <span class="game-result">{{ game.result }}</span>
+          <div class="game-title-right">
+            <span v-if="activeGameId === game.id" class="displayed-badge">Displayed in PGN</span>
+            <span class="game-result">{{ game.result }}</span>
+          </div>
         </div>
         <div class="game-meta">
           <span class="event">{{ game.event }}</span>
@@ -36,21 +39,19 @@ export default {
     initialGameId: {
       type: [Number, String],
       default: null
+    },
+    displayedGameId: {
+      type: [Number, String],
+      default: null
     }
   },
-  data() {
-    return {
-      selectedGameId: this.initialGameId
-    };
-  },
-  watch: {
-    initialGameId(newId) {
-      this.selectedGameId = newId;
+  computed: {
+    activeGameId() {
+      return this.displayedGameId ?? this.initialGameId;
     }
   },
   methods: {
     selectGame(gameId) {
-      this.selectedGameId = gameId;
       this.$emit('select-game', gameId);
     }
   }
@@ -135,6 +136,23 @@ export default {
   padding: 0.2rem 0.3rem;
   background: #e0e0e0;
   border-radius: 2px;
+  white-space: nowrap;
+}
+
+.game-title-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.displayed-badge {
+  font-size: 0.62rem;
+  font-weight: 600;
+  color: #0c4f7a;
+  background: #e7f4ff;
+  border: 1px solid #9ecdf1;
+  border-radius: 10px;
+  padding: 0.12rem 0.4rem;
   white-space: nowrap;
 }
 

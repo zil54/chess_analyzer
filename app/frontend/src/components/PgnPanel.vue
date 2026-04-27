@@ -4,6 +4,9 @@
       <h3>{{ pgnData.headers.white }} vs {{ pgnData.headers.black }}</h3>
       <p>{{ pgnData.headers.event }} - {{ pgnData.headers.date }}</p>
       <p>Result: {{ pgnData.headers.result }}</p>
+      <p v-if="pgnData.isScratchGame" class="scratch-game-note">
+        This is a brand new unsaved game created from analysis-board moves. You can add comments here and click Save to store it as a normal PGN game.
+      </p>
     </div>
 
     <div v-if="pgnData" class="notes-section">
@@ -174,8 +177,7 @@ export default {
         }
         this.isNagPopoverOpen = false;
       },
-      immediate: true,
-      deep: true
+      immediate: true
     }
   },
   computed: {
@@ -200,14 +202,14 @@ export default {
   },
   methods: {
     updateComment() {
-      if (!this.currentTreeNode || !this.currentTreeNode.id) return;
+      if (!this.currentTreeNode || !Number.isInteger(this.currentTreeNode.id)) return;
       this.$emit('update-node-comment', {
         nodeId: this.currentTreeNode.id,
         comment: this.commentText
       });
     },
     toggleNagPopover() {
-      if (!this.currentTreeNode?.id) return;
+      if (!Number.isInteger(this.currentTreeNode?.id)) return;
       this.isNagPopoverOpen = !this.isNagPopoverOpen;
     },
     closeNagPopover() {
@@ -217,7 +219,7 @@ export default {
       return this.selectedNags.has(nag);
     },
     toggleNag(nag) {
-      if (!this.currentTreeNode?.id) return;
+      if (!Number.isInteger(this.currentTreeNode?.id)) return;
       const next = new Set(this.selectedNags);
       if (next.has(nag)) {
         next.delete(nag);
@@ -228,7 +230,7 @@ export default {
       this.emitNags();
     },
     clearNags() {
-      if (!this.currentTreeNode?.id) return;
+      if (!Number.isInteger(this.currentTreeNode?.id)) return;
       this.selectedNags = new Set();
       this.emitNags();
     },
@@ -257,6 +259,16 @@ export default {
   border-left: 3px solid #2196F3;
   border-radius: 4px;
   font-size: 0.85rem;
+}
+
+.scratch-game-note {
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: #fff8e1;
+  border-left: 3px solid #ffb300;
+  border-radius: 4px;
+  color: #6d4c41;
+  font-weight: 500;
 }
 
 .pgn-header h3 {
